@@ -1,0 +1,59 @@
+#########################################
+#   PYTHON (BACKEND)
+#########################################
+
+# Virtual env
+backend/venv/
+backend/.venv/
+.venv
+
+# Cache & compiled files
+backend/_pycache_/
+backend//*.pyc
+backend//*.pyo
+backend//*.pyd
+
+# SQLite (caso exista)
+backend/*.db
+
+#########################################
+#   NODE (FRONTEND)
+#########################################
+
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.cache/
+
+#########################################
+#   ENV FILES (Python e JS)
+#########################################
+
+**/.env
+**/.env.local
+**/.env.development
+**/.env.production
+
+#########################################
+#   LOG FILES
+#########################################
+
+*.log
+
+#########################################
+#   SISTEMA / IDE / EDITOR
+#########################################
+
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.venv/
+
+#########################################
+#   OUTROS
+#########################################
+
+*.swp
+*.bak
+*.tmp
