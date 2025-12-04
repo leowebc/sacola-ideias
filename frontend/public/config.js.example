@@ -1,0 +1,9 @@
+// Configuração da API - Exemplo
+// Copie este arquivo para config.js e ajuste a URL
+// Este arquivo será carregado antes do React e permite configurar a URL da API dinamicamente
+
+window.API_URL = 'https://seu-backend.onrender.com/api';
+
+// Ou use a URL do backend na Hostgator se tiver um:
+// window.API_URL = 'https://api.seusite.com.br/api';
+
