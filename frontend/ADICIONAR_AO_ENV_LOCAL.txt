@@ -1,0 +1,22 @@
+# =====================================================
+# ADICIONE ESTAS LINHAS NO SEU frontend/.env.local
+# =====================================================
+# Se o arquivo .env.local não existir, crie-o na pasta frontend/
+# Copie e cole estas linhas:
+
+# =====================================================
+# CONFIGURAÇÕES DO FRONTEND
+# =====================================================
+# URL da API Backend
+VITE_API_URL=http://localhost:8002/api
+
+# Email de contato (opcional, padrão é contato@sacoladeideias.com se não especificar)
+VITE_CONTATO_EMAIL=contato@sacoladeideias.com
+
+# =====================================================
+# NOTA:
+# =====================================================
+# Para produção, use:
+# VITE_API_URL=https://api.sacola-ideias.com/api
+# VITE_CONTATO_EMAIL=contato@sacoladeideias.com
+

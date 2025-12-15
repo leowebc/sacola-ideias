@@ -1,0 +1,33 @@
+# =====================================================
+# ADICIONE ESTAS LINHAS NO SEU backend/.env
+# =====================================================
+# Copie e cole estas linhas no final do seu arquivo .env
+# (ou adicione se já não existirem)
+
+# =====================================================
+# PORTAS E URLs - NOVAS VARIÁVEIS
+# =====================================================
+# Porta do backend (opcional, padrão é 8002 se não especificar)
+BACKEND_PORT=8002
+
+# URL do frontend
+FRONTEND_URL=http://localhost:5173
+
+# URL de callback do Google OAuth
+GOOGLE_REDIRECT_URI=http://localhost:8002/api/auth/google/callback
+
+# Email de contato (opcional, padrão é contato@sacoladeideias.com se não especificar)
+CONTATO_EMAIL=contato@sacoladeideias.com
+
+# =====================================================
+# NOTA:
+# =====================================================
+# Se você já tem FRONTEND_URL e GOOGLE_REDIRECT_URI no seu .env,
+# apenas adicione BACKEND_PORT e CONTATO_EMAIL
+#
+# Para produção, use:
+# BACKEND_PORT=8002
+# FRONTEND_URL=https://www.sacola-ideias.com
+# GOOGLE_REDIRECT_URI=https://api.sacola-ideias.com/api/auth/google/callback
+# CONTATO_EMAIL=contato@sacoladeideias.com
+

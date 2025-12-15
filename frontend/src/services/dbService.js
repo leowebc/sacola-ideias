@@ -286,7 +286,7 @@ export async function deletarIdeia(id) {
 }
 
 // Buscar por similaridade (backend gera embedding automaticamente)
-export async function buscarPorSimilaridade(termoBusca) {
+export async function buscarPorSimilaridade(termoBusca, options = {}) {
   try {
     // Backend gera embedding automaticamente, só enviar o termo
     return await fetchAPI('/ideias/buscar', {
@@ -294,6 +294,7 @@ export async function buscarPorSimilaridade(termoBusca) {
       body: JSON.stringify({
         termo: termoBusca,
       }),
+      ...options,
     })
   } catch (error) {
     console.error('Erro na busca por similaridade:', error)

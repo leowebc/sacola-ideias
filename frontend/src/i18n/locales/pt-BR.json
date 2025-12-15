@@ -17,11 +17,11 @@
     "subtitle": "Capture suas ideias e anotações de forma inteligente",
     "subtitleEdit": "Atualize sua ideia ou anotação",
     "titulo": "Título",
-    "tituloPlaceholder": "Ex: Ideia para novo projeto...",
+    "tituloPlaceholder": "Ex: algo relacionado a anotação ou ideia",
     "tag": "Tag",
     "tagSugestoes": "{{count}} sugestões",
     "ideia": "Ideia / Anotação",
-    "ideiaPlaceholder": "Descreva sua ideia ou anotação aqui... Seja criativo!",
+    "ideiaPlaceholder": "Descreva sua ideia ou anotação aqui... ",
     "salvar": "Salvar na Sacola",
     "salvando": "Salvando...",
     "cancelar": "Cancelar edição e criar nova ideia",
@@ -45,6 +45,8 @@
     "semResultadosTermo": "Nenhuma ideia encontrada com esse termo.",
     "semResultadosTitulo": "Nenhuma ideia cadastrada ainda",
     "semResultadosHint": "Comece cadastrando uma nova ideia na tela de cadastro!",
+    "semResultadosBuscaTitulo": "Faça sua busca",
+    "semResultadosBuscaHint": "Digite no campo acima para encontrar suas ideias",
     "carregarMais": "Carregar mais ideias",
     "aiAtivada": "Busca inteligente ativada - encontrando ideias por similaridade semântica",
     "similaridade": "Similaridade: {{percent}}%",
@@ -108,5 +110,40 @@
     "erroDesc": "Tente novamente mais tarde ou entre em contato diretamente por email.",
     "erroValidacao": "Campos obrigatórios",
     "erroValidacaoDesc": "Por favor, preencha todos os campos."
+  },
+  "lembranca": {
+    "titulo": "Busca de Lembrança",
+    "subtitulo": "Descreva o que você está tentando lembrar e a IA vai te ajudar",
+    "inputLabel": "O que você está tentando lembrar?",
+    "inputPlaceholder": "Ex: eu viajei num país que tinha uma torre...",
+    "sugestoesIA": "Sugestões da IA",
+    "semSugestoes": "Continue descrevendo para receber sugestões da IA",
+    "dica": "💡 Dica: Quanto mais detalhes você fornecer, melhores serão as sugestões!",
+    "fechar": "Fechar",
+    "tooltip": "Busca de lembrança que não está cadastrada - A IA vai te ajudar a lembrar!"
+  },
+  "settings": {
+    "menu": "Configurações",
+    "faleConosco": "Fale Conosco",
+    "alterarSenha": "Alterar Senha",
+    "sair": "Sair"
+  },
+  "alterarSenha": {
+    "titulo": "Alterar Senha",
+    "subtitulo": "Atualize sua senha de acesso",
+    "senhaAtual": "Senha Atual",
+    "senhaAtualPlaceholder": "Digite sua senha atual",
+    "novaSenha": "Nova Senha",
+    "novaSenhaPlaceholder": "Digite sua nova senha (mínimo 6 caracteres)",
+    "confirmarSenha": "Confirmar Nova Senha",
+    "confirmarSenhaPlaceholder": "Digite novamente sua nova senha",
+    "salvar": "Salvar Nova Senha",
+    "salvando": "Salvando...",
+    "success": "Senha alterada com sucesso!",
+    "error": "Erro ao alterar senha",
+    "errorDesc": "Verifique se a senha atual está correta e tente novamente.",
+    "validacao": "Por favor, preencha todos os campos.",
+    "senhasNaoConferem": "As senhas não conferem",
+    "senhaMinima": "A senha deve ter no mínimo 6 caracteres"
   }
 }

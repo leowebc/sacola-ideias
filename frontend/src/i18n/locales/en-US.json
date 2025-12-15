@@ -44,6 +44,8 @@
     "semResultadosTermo": "No ideas found for this term.",
     "semResultadosTitulo": "No ideas added yet",
     "semResultadosHint": "Start by registering a new idea on the register page!",
+    "semResultadosBuscaTitulo": "Start by searching",
+    "semResultadosBuscaHint": "Type in the field above to find your ideas",
     "carregarMais": "Load more ideas",
     "aiAtivada": "Intelligent search activated - finding ideas by semantic similarity",
     "similaridade": "Similarity: {{percent}}%",
@@ -108,6 +110,17 @@
     "erroValidacao": "Required fields",
     "erroValidacaoDesc": "Please fill in all fields."
   },
+  "lembranca": {
+    "titulo": "Memory Search",
+    "subtitulo": "Describe what you're trying to remember and AI will help you",
+    "inputLabel": "What are you trying to remember?",
+    "inputPlaceholder": "Ex: I traveled to a country that had a tower...",
+    "sugestoesIA": "AI Suggestions",
+    "semSugestoes": "Keep describing to receive AI suggestions",
+    "dica": "💡 Tip: The more details you provide, the better the suggestions!",
+    "fechar": "Close",
+    "tooltip": "Search for memories that aren't registered - AI will help you remember!"
+  },
   "nav": {
     "title": "Ideas Bag",
     "subtitle": "Intelligent Notes System",
@@ -118,6 +131,30 @@
     "limparDesc": "Clear old localStorage data? (API key will be preserved)",
     "limparSuccess": "LocalStorage cleared!",
     "idioma": "Language"
+  },
+  "settings": {
+    "menu": "Settings",
+    "faleConosco": "Contact Us",
+    "alterarSenha": "Change Password",
+    "sair": "Logout"
+  },
+  "alterarSenha": {
+    "titulo": "Change Password",
+    "subtitulo": "Update your access password",
+    "senhaAtual": "Current Password",
+    "senhaAtualPlaceholder": "Enter your current password",
+    "novaSenha": "New Password",
+    "novaSenhaPlaceholder": "Enter your new password (minimum 6 characters)",
+    "confirmarSenha": "Confirm New Password",
+    "confirmarSenhaPlaceholder": "Enter your new password again",
+    "salvar": "Save New Password",
+    "salvando": "Saving...",
+    "success": "Password changed successfully!",
+    "error": "Error changing password",
+    "errorDesc": "Please check if the current password is correct and try again.",
+    "validacao": "Please fill in all fields.",
+    "senhasNaoConferem": "Passwords do not match",
+    "senhaMinima": "Password must be at least 6 characters"
   }
 }
 

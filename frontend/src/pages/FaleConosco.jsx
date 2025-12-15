@@ -6,6 +6,9 @@ const API_URL = (typeof window !== 'undefined' && window.API_URL)
   ? window.API_URL 
   : (import.meta.env.VITE_API_URL || 'http://localhost:8002/api')
 
+// Email de contato - pode ser configurado via variável de ambiente
+const CONTATO_EMAIL = import.meta.env.VITE_CONTATO_EMAIL || 'contato@sacoladeideias.com'
+
 function FaleConosco() {
   const { t } = useTranslation()
   const [nome, setNome] = useState('')
@@ -38,8 +41,8 @@ function FaleConosco() {
           email: email.trim(),
           assunto: assunto.trim(),
           mensagem: mensagem.trim(),
-          // Email de destino fixo - todas as mensagens vão para este email
-          email_destino: 'contato@sacoladeideias.com'
+          // Email de destino - configurável via VITE_CONTATO_EMAIL
+          email_destino: CONTATO_EMAIL
         })
       })
 
@@ -99,7 +102,7 @@ function FaleConosco() {
                   </div>
                   <div>
                     <p className="text-sm font-semibold text-gray-900">{t('contato.email')}</p>
-                    <p className="text-sm text-gray-600">contato@sacoladeideias.com</p>
+                    <p className="text-sm text-gray-600">{CONTATO_EMAIL}</p>
                   </div>
                 </div>
                 <div className="flex items-start space-x-3">

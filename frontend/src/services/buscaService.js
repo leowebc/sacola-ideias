@@ -74,7 +74,7 @@ export async function gerarEmbeddingBusca(texto, apiKey) {
 }
 
 // Buscar ideias por similaridade (backend gera embedding automaticamente)
-export async function buscarPorSimilaridade(termoBusca, apiKey) {
+export async function buscarPorSimilaridade(termoBusca, apiKey, options = {}) {
   if (!termoBusca || !termoBusca.trim()) {
     // Retornar todas as ideias se não houver termo de busca (sem similaridade)
     const ideias = await buscarTodasIdeias()
@@ -83,7 +83,7 @@ export async function buscarPorSimilaridade(termoBusca, apiKey) {
 
   try {
     // Backend gera embedding automaticamente, só enviar o termo
-    const resultados = await buscarPorSimilaridadeDB(termoBusca)
+    const resultados = await buscarPorSimilaridadeDB(termoBusca, options)
     return resultados.map(r => ({
       ideia: {
         id: r.id,

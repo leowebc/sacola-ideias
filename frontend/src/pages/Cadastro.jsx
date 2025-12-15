@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import SacolaAnimacao from '../components/SacolaAnimacao'
 import AutocompleteInput from '../components/AutocompleteInput'
+import LembrancaModal from '../components/LembrancaModal'
 import { salvarIdeiaComEmbedding } from '../services/buscaService'
 import { getApiKey } from '../utils/apiKey'
 import { showError } from '../utils/alerts'
@@ -17,6 +18,12 @@ function Cadastro() {
   const [tagsSugeridas, setTagsSugeridas] = useState([])
   const [editandoId, setEditandoId] = useState(null)
   const [imagemErro, setImagemErro] = useState(false)
+  const [mostrarLembrancaModal, setMostrarLembrancaModal] = useState(false)
+
+  // Debug
+  useEffect(() => {
+    console.log('🔍 mostrarLembrancaModal:', mostrarLembrancaModal)
+  }, [mostrarLembrancaModal])
 
   // Nota: A edição agora é feita diretamente no modal, então não precisamos mais
   // carregar ideias para editar aqui. Mas mantemos o código caso seja necessário.
@@ -36,13 +43,19 @@ function Cadastro() {
         const tags = [...new Set(ideias.map(i => i.tag).filter(Boolean))]
         setTagsSugeridas(tags)
       } catch (error) {
-        console.log('Erro ao carregar sugestões do banco, usando localStorage:', error)
-        // Fallback para localStorage
-        const ideias = JSON.parse(localStorage.getItem('sacola_ideias') || '[]')
-        const titulos = [...new Set(ideias.map(i => i.titulo).filter(Boolean))]
-        const tags = [...new Set(ideias.map(i => i.tag).filter(Boolean))]
-        setTitulosSugeridos(titulos)
-        setTagsSugeridas(tags)
+        console.error('Erro ao carregar sugestões do banco:', error)
+        // Fallback para localStorage ou arrays vazios
+        try {
+          const ideias = JSON.parse(localStorage.getItem('sacola_ideias') || '[]')
+          const titulos = [...new Set(ideias.map(i => i.titulo).filter(Boolean))]
+          const tags = [...new Set(ideias.map(i => i.tag).filter(Boolean))]
+          setTitulosSugeridos(titulos)
+          setTagsSugeridas(tags)
+        } catch (localError) {
+          console.error('Erro ao carregar do localStorage:', localError)
+          setTitulosSugeridos([])
+          setTagsSugeridas([])
+        }
       }
     }
 
@@ -385,7 +398,39 @@ function Cadastro() {
           </div>
 
           {/* Animação da Sacola */}
-          <div className="modern-card rounded-2xl p-8 flex items-center justify-center min-h-[500px] animate-fade-in">
+          <div className="modern-card rounded-2xl p-8 flex items-center justify-center min-h-[500px] animate-fade-in relative">
+            {/* Imagem "esqueceu?" no canto direito */}
+            <div 
+              className="absolute top-4 right-4 group z-20"
+              title={t('lembranca.tooltip')}
+            >
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  console.log('🔍 Clicou na imagem esqueceu?')
+                  setMostrarLembrancaModal(true)
+                }}
+                className="p-0 border-0 bg-transparent cursor-pointer"
+              >
+                <img
+                  src="/images/esqueceu.svg"
+                  alt="Esqueceu?"
+                  width="100"
+                  height="100"
+                  className="drop-shadow-lg hover:scale-110 transition-transform duration-300 cursor-pointer"
+                  onError={(e) => {
+                    console.error('Erro ao carregar imagem esqueceu.svg')
+                    e.target.style.display = 'none'
+                  }}
+                />
+              </button>
+              {/* Tooltip */}
+              <div className="absolute right-0 top-full mt-2 w-64 p-3 bg-gray-900 text-white text-sm rounded-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10">
+                {t('lembranca.tooltip')}
+                <div className="absolute -top-1 right-4 w-2 h-2 bg-gray-900 transform rotate-45"></div>
+              </div>
+            </div>
             <SacolaAnimacao 
               titulo={titulo}
               tag={tag}
@@ -395,6 +440,29 @@ function Cadastro() {
           </div>
         </div>
       </div>
+
+      {/* Modal de Lembrança */}
+      <LembrancaModal 
+        isOpen={mostrarLembrancaModal}
+        onClose={() => setMostrarLembrancaModal(false)}
+        onSugestaoSelecionada={(dados) => {
+          try {
+            // Se for um objeto, preencher título, tag e ideia
+            if (typeof dados === 'object' && dados !== null) {
+              if (dados.titulo) setTitulo(dados.titulo)
+              if (dados.tag) setTag(dados.tag)
+              if (dados.ideia) setIdeia(dados.ideia)
+            } else {
+              // Se for string, preencher apenas a ideia
+              setIdeia(dados)
+            }
+            setMostrarLembrancaModal(false)
+          } catch (error) {
+            console.error('Erro ao processar sugestão selecionada:', error)
+            setMostrarLembrancaModal(false)
+          }
+        }}
+      />
     </div>
   )
 }

@@ -13,7 +13,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
 from dotenv import load_dotenv
-from langchain_openai import OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from auth import (
     criar_token_jwt, 
     verificar_token_jwt, 
@@ -25,7 +25,14 @@ from auth import (
 
 load_dotenv()
 
-
+# =====================================================
+# CONFIGURAÇÕES DE AMBIENTE (URLs e Portas)
+# =====================================================
+# Todas as URLs e portas devem vir do .env para funcionar em local e produção
+BACKEND_PORT = int(os.getenv("BACKEND_PORT", "8002"))
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", f"http://localhost:{BACKEND_PORT}/api/auth/google/callback")
+CONTATO_EMAIL = os.getenv("CONTATO_EMAIL", "contato@sacoladeideias.com")
 
 # Configurar embeddings (usa API Key do .env)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -54,6 +61,59 @@ def gerar_embedding(texto: str):
 
 app = FastAPI(title="Sacola de Ideias API")
 
+# Evento de startup para verificar endpoints registrados e testar conexão
+@app.on_event("startup")
+async def startup_event():
+    print("=" * 80)
+    print("📋 TODOS OS ENDPOINTS REGISTRADOS:")
+    total_routes = 0
+    auth_routes = []
+    lembrancas_routes = []
+    for route in app.routes:
+        if hasattr(route, 'path'):
+            total_routes += 1
+            methods = getattr(route, 'methods', set())
+            path = route.path
+            if 'auth' in path:
+                auth_routes.append(f"{list(methods)} {path}")
+            if 'lembrancas' in path:
+                lembrancas_routes.append(f"{list(methods)} {path}")
+            print(f"   ✅ {list(methods)} {path}")
+    print(f"📊 Total de rotas: {total_routes}")
+    print(f"🔐 Endpoints de autenticação: {len(auth_routes)}")
+    if 'alterar-senha' in str(auth_routes):
+        print("✅ Endpoint /api/auth/alterar-senha encontrado!")
+    else:
+        print("❌ Endpoint /api/auth/alterar-senha NÃO encontrado!")
+    if lembrancas_routes:
+        print("✅ Endpoints de lembranças encontrados!")
+    else:
+        print("❌ NENHUM endpoint de lembranças encontrado!")
+    print("=" * 80)
+    
+    # Testar conexão com o banco
+    print("=" * 80)
+    print("🔌 TESTANDO CONEXÃO COM O BANCO DE DADOS:")
+    print(f"   Host: {DB_CONFIG['host']}")
+    print(f"   Port: {DB_CONFIG['port']}")
+    print(f"   Database: {DB_CONFIG['database']}")
+    print(f"   User: {DB_CONFIG['user']}")
+    print(f"   Password: {'***' if DB_CONFIG['password'] else 'NÃO CONFIGURADO'}")
+    print("=" * 80)
+    
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("SELECT version();")
+            version = cur.fetchone()[0]
+            print(f"✅ Conexão com o banco estabelecida com sucesso!")
+            print(f"   PostgreSQL version: {version[:50]}...")
+        conn.close()
+    except Exception as e:
+        print(f"❌ ERRO ao conectar com o banco: {e}")
+        print(f"   Verifique as credenciais no arquivo .env")
+    print("=" * 80)
+
 # Configurar CORS
 app.add_middleware(
     CORSMiddleware,
@@ -63,14 +123,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configuração do banco de dados
+# Configuração do banco de dados (Supabase ou PostgreSQL local)
+# Em produção: use as variáveis de ambiente do servidor
+# Em local: configure no arquivo .env (veja ENV_SETUP.md)
+# 
+# NOTA: Você pode usar o mesmo Supabase em local e produção, ou criar um banco
+# separado para desenvolvimento local. Basta mudar as variáveis DB_* no .env local.
 DB_CONFIG = {
     "host": os.getenv("DB_HOST", "localhost"),
-    "database": os.getenv("DB_NAME", "sacola_ideias"),
+    "database": os.getenv("DB_NAME", "postgres"),  # Supabase usa 'postgres' como database padrão
     "user": os.getenv("DB_USER", "postgres"),
-    "password": os.getenv("DB_PASSWORD", "senha123"),
-    "port": os.getenv("DB_PORT", "5432"),
+    # Prioridade: SUPABASE_DB_PASSWORD > DB_PASSWORD > fallback
+    "password": os.getenv("SUPABASE_DB_PASSWORD") or os.getenv("DB_PASSWORD", "senha123"),
+    "port": int(os.getenv("DB_PORT", "5432")),  # Converter para int
 }
+
+# Adicionar sslmode se especificado (importante para Supabase)
+if os.getenv("DB_SSLMODE"):
+    DB_CONFIG["sslmode"] = os.getenv("DB_SSLMODE")
 
 def get_db_connection():
     """Criar conexão com o banco de dados"""
@@ -79,14 +149,20 @@ def get_db_connection():
         return conn
     except psycopg2.OperationalError as e:
         print(f"❌ Erro de conexão com o banco: {e}")
-        print(f"   Verifique se o PostgreSQL está rodando")
-        print(f"   Config: {DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['database']}")
+        print(f"   Host: {DB_CONFIG.get('host', 'N/A')}")
+        print(f"   Port: {DB_CONFIG.get('port', 'N/A')}")
+        print(f"   Database: {DB_CONFIG.get('database', 'N/A')}")
+        print(f"   User: {DB_CONFIG.get('user', 'N/A')}")
+        print(f"   Password configurada: {'Sim' if DB_CONFIG.get('password') else 'NÃO'}")
+        print(f"   SSL Mode: {DB_CONFIG.get('sslmode', 'não especificado')}")
         raise HTTPException(
             status_code=503, 
-            detail=f"Erro ao conectar ao banco de dados. Verifique se o PostgreSQL está rodando. Detalhes: {str(e)}"
+            detail=f"Erro ao conectar ao banco de dados. Verifique as credenciais no .env. Detalhes: {str(e)}"
         )
     except Exception as e:
-        print(f"❌ Erro ao conectar ao banco: {e}")
+        print(f"❌ Erro inesperado ao conectar: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(
             status_code=500,
             detail=f"Erro inesperado ao conectar ao banco: {str(e)}"
@@ -119,6 +195,8 @@ class IdeiaComEmbedding(BaseModel):
 
 class BuscaRequest(BaseModel):
     termo: str
+    limite: Optional[int] = 10
+    probes: Optional[int] = 15
 
 class BuscaResponse(BaseModel):
     id: int
@@ -164,6 +242,10 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     senha: str
+
+class AlterarSenhaRequest(BaseModel):
+    senha_atual: str
+    nova_senha: str
 
 # Função para obter usuário autenticado
 async def obter_usuario_atual(request: Request) -> dict:
@@ -637,6 +719,10 @@ def buscar_por_similaridade(busca: BuscaRequest, user: dict = Depends(obter_usua
         raise HTTPException(status_code=401, detail="Não autenticado")
     
     usuario_id = user["user_id"]
+    limite = busca.limite if busca.limite and busca.limite > 0 else 10
+    limite = min(max(limite, 1), 50)  # guarda-chuva para evitar abusos
+    probes = busca.probes if busca.probes and busca.probes > 0 else 10
+    probes = min(max(probes, 1), 200)
     conn = get_db_connection()
     try:
         # Gerar embedding do termo de busca automaticamente
@@ -659,8 +745,8 @@ def buscar_por_similaridade(busca: BuscaRequest, user: dict = Depends(obter_usua
                        OR LOWER(tag) LIKE %s 
                        OR LOWER(ideia) LIKE %s)
                     ORDER BY data DESC
-                    LIMIT 20
-                """, (usuario_id, f'%{termo}%', f'%{termo}%', f'%{termo}%'))
+                    LIMIT %s
+                """, (usuario_id, f'%{termo}%', f'%{termo}%', f'%{termo}%', limite))
                 resultados = cur.fetchall()
                 return [dict(resultado) for resultado in resultados]
         
@@ -672,6 +758,8 @@ def buscar_por_similaridade(busca: BuscaRequest, user: dict = Depends(obter_usua
         embedding_str = "[" + ",".join(map(str, embedding_busca)) + "]"
         
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Ajusta probes para balancear precisão x velocidade no ivfflat
+            cur.execute("SET LOCAL ivfflat.probes = %s", (probes,))
             cur.execute("""
                 SELECT 
                     id,
@@ -682,10 +770,10 @@ def buscar_por_similaridade(busca: BuscaRequest, user: dict = Depends(obter_usua
                     1 - (embedding <=> %s::vector) AS similarity
                 FROM ideias
                 WHERE usuario_id = %s AND embedding IS NOT NULL
-                AND (1 - (embedding <=> %s::vector)) >= 0.3
+                  AND (embedding <=> %s::vector) <= 0.7  -- equivalente a similarity >= 0.3
                 ORDER BY embedding <=> %s::vector
-                LIMIT 20
-            """, (usuario_id, embedding_str, embedding_str, embedding_str))
+                LIMIT %s
+            """, (embedding_str, usuario_id, embedding_str, embedding_str, limite))
             resultados = cur.fetchall()
             return [dict(resultado) for resultado in resultados]
     except HTTPException:
@@ -885,8 +973,8 @@ def login_google_redirect():
             detail="Login com Google não está configurado. Configure GOOGLE_CLIENT_ID no backend/.env"
         )
     
-    # URL de autorização do Google
-    redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8002/api/auth/google/callback")
+    # URL de autorização do Google (usa variável global)
+    redirect_uri = GOOGLE_REDIRECT_URI
     scope = "openid email profile"
     
     # Codificar redirect_uri para URL (usar urlencode para query parameters)
@@ -1016,19 +1104,14 @@ async def google_callback_get(code: str = Query(...), error: Optional[str] = Que
     """Processar callback do Google OAuth (GET) e redirecionar para frontend"""
     if error:
         # Se houver erro, redirecionar para frontend com erro
-        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
-        return RedirectResponse(url=f"{frontend_url}/auth/google/callback?error={error}")
+        return RedirectResponse(url=f"{FRONTEND_URL}/auth/google/callback?error={error}")
     
     try:
-        # Obter redirect_uri do .env
-        redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8002/api/auth/google/callback")
-        
-        # Obter informações do usuário do Google
-        google_info = await obter_info_google_por_code(code, redirect_uri)
+        # Obter informações do usuário do Google (usa variável global)
+        google_info = await obter_info_google_por_code(code, GOOGLE_REDIRECT_URI)
         
         if not google_info:
-            frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
-            return RedirectResponse(url=f"{frontend_url}/auth/google/callback?error=authentication_failed")
+            return RedirectResponse(url=f"{FRONTEND_URL}/auth/google/callback?error=authentication_failed")
         
         google_id = google_info["google_id"]
         email = google_info["email"]
@@ -1107,19 +1190,17 @@ async def google_callback_get(code: str = Query(...), error: Optional[str] = Que
         finally:
             conn.close()
         
-        # Redirecionar para frontend com token
-        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
-        return RedirectResponse(url=f"{frontend_url}/auth/google/callback?code={code}&token={token}")
+        # Redirecionar para frontend com token (usa variável global)
+        return RedirectResponse(url=f"{FRONTEND_URL}/auth/google/callback?code={code}&token={token}")
         
     except Exception as e:
         print(f"Erro no callback Google (GET): {e}")
-        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
-        return RedirectResponse(url=f"{frontend_url}/auth/google/callback?error=server_error")
+        return RedirectResponse(url=f"{FRONTEND_URL}/auth/google/callback?error=server_error")
 
 @app.get("/api/auth/google/debug")
 def debug_google_oauth():
     """Endpoint de debug para verificar configuração do Google OAuth"""
-    redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8002/api/auth/google/callback")
+    redirect_uri = GOOGLE_REDIRECT_URI
     from urllib.parse import quote
     redirect_uri_encoded = quote(redirect_uri, safe='')
     
@@ -1156,6 +1237,59 @@ async def obter_usuario_logado(user: dict = Depends(obter_usuario_atual)):
                 raise HTTPException(status_code=404, detail="Usuário não encontrado")
             
             return dict(usuario)
+    finally:
+        conn.close()
+
+@app.post("/api/auth/alterar-senha")
+async def alterar_senha(dados: AlterarSenhaRequest, user: dict = Depends(obter_usuario_atual)):
+    """Alterar senha do usuário logado"""
+    if not user:
+        raise HTTPException(status_code=401, detail="Não autenticado")
+    
+    if len(dados.nova_senha) < 6:
+        raise HTTPException(status_code=400, detail="A senha deve ter no mínimo 6 caracteres")
+    
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Buscar usuário e verificar senha atual
+            cur.execute("""
+                SELECT id, email, senha_hash, metodo_auth
+                FROM usuarios 
+                WHERE id = %s
+            """, (user["user_id"],))
+            usuario = cur.fetchone()
+            
+            if not usuario:
+                raise HTTPException(status_code=404, detail="Usuário não encontrado")
+            
+            # Verificar se usuário tem senha (não é login apenas por Google)
+            if not usuario.get("senha_hash"):
+                raise HTTPException(status_code=400, detail="Usuário não possui senha cadastrada (login apenas por Google)")
+            
+            # Verificar senha atual
+            if not verificar_senha(dados.senha_atual, usuario["senha_hash"]):
+                raise HTTPException(status_code=401, detail="Senha atual incorreta")
+            
+            # Gerar hash da nova senha
+            nova_senha_hash = hash_senha(dados.nova_senha)
+            
+            # Atualizar senha no banco
+            cur.execute("""
+                UPDATE usuarios 
+                SET senha_hash = %s
+                WHERE id = %s
+            """, (nova_senha_hash, user["user_id"]))
+            
+            conn.commit()
+            
+            return {"message": "Senha alterada com sucesso"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        print(f"Erro ao alterar senha: {e}")
+        raise HTTPException(status_code=500, detail="Erro ao alterar senha")
     finally:
         conn.close()
 
@@ -1231,7 +1365,7 @@ class ContatoCreate(BaseModel):
     email: str
     assunto: str
     mensagem: str
-    email_destino: Optional[str] = "contato@sacoladeideias.com"
+    email_destino: Optional[str] = None  # Será preenchido com CONTATO_EMAIL se não fornecido
 
 class ContatoResponse(BaseModel):
     id: int
@@ -1300,7 +1434,7 @@ async def criar_contato(contato: ContatoCreate, request: Request):
                 contato.email.strip(),
                 contato.assunto.strip(),
                 contato.mensagem.strip(),
-                contato.email_destino or "contato@sacoladeideias.com",
+                contato.email_destino or CONTATO_EMAIL,
                 "pendente",
                 datetime.now()
             ))
@@ -1330,6 +1464,106 @@ async def criar_contato(contato: ContatoCreate, request: Request):
     finally:
         if conn:
             conn.close()
+
+# =====================================================
+# ENDPOINT: SUGESTÕES DE LEMBRANÇA COM IA
+# =====================================================
+print("🔍 [DEBUG] Carregando módulo de lembranças...")
+
+class LembrancaRequest(BaseModel):
+    texto: str
+
+class LembrancaResponse(BaseModel):
+    sugestoes: List[str]
+
+def get_chat_model():
+    """Obter modelo de chat OpenAI para gerar sugestões"""
+    if not OPENAI_API_KEY:
+        return None
+    try:
+        return ChatOpenAI(
+            openai_api_key=OPENAI_API_KEY,
+            model="gpt-4o-mini",
+            temperature=0.7
+        )
+    except:
+        return None
+
+print("🔍 [DEBUG] Definindo endpoint GET /api/lembrancas/teste...")
+@app.get("/api/lembrancas/teste")
+async def teste_lembrancas():
+    """Endpoint de teste para verificar se a rota está funcionando"""
+    return {"status": "ok", "mensagem": "Endpoint de lembranças está funcionando"}
+
+print("🔍 [DEBUG] Definindo endpoint POST /api/lembrancas/sugerir...")
+@app.post("/api/lembrancas/sugerir", response_model=LembrancaResponse)
+async def sugerir_lembranca(lembranca: LembrancaRequest, request: Request):
+    """Gerar sugestões de lembrança usando IA baseado no texto descritivo"""
+    print("=" * 80)
+    print("💭 SUGESTÃO DE LEMBRANÇA - ENDPOINT CHAMADO!")
+    print(f"   Texto recebido: {lembranca.texto[:100]}...")
+    print("=" * 80)
+    
+    if not lembranca.texto.strip():
+        return LembrancaResponse(sugestoes=[])
+    
+    modelo = get_chat_model()
+    if not modelo:
+        print("⚠️  OpenAI API Key não configurada")
+        return LembrancaResponse(sugestoes=[])
+    
+    try:
+        # Prompt para a IA gerar sugestões contextuais
+        prompt = f"""Você é um assistente de memória. O usuário está tentando lembrar de algo e descreveu:
+
+"{lembranca.texto}"
+
+Com base nessa descrição, gere 3-5 sugestões curtas e específicas que possam ajudar a pessoa a lembrar. 
+As sugestões devem ser:
+- Curta (máximo 10 palavras)
+- Específica e concreta
+- Relacionada ao contexto descrito
+- Em formato de pergunta ou afirmação curta
+
+Exemplos de boas sugestões:
+- "qual aquela fruta pequena roxa?"
+- "a Torre Eiffel em Paris?"
+- "o nome daquele restaurante italiano?"
+- "aquela música que tocava na rádio?"
+
+Retorne APENAS as sugestões, uma por linha, sem numeração ou marcadores."""
+
+        resposta = modelo.invoke(prompt)
+        print(f"📝 Resposta bruta da IA: {resposta.content[:200]}...")
+        
+        sugestoes_texto = resposta.content.strip()
+        
+        # Separar sugestões por linha e limpar
+        sugestoes = [
+            s.strip() 
+            for s in sugestoes_texto.split('\n') 
+            if s.strip() and not s.strip().startswith(('1.', '2.', '3.', '4.', '5.', '-', '*', '•'))
+        ]
+        
+        # Limitar a 5 sugestões
+        sugestoes = sugestoes[:5]
+        
+        print(f"✅ {len(sugestoes)} sugestões geradas")
+        for i, sug in enumerate(sugestoes, 1):
+            print(f"   {i}. {sug}")
+        print("=" * 80)
+        
+        if not sugestoes:
+            print("⚠️  Nenhuma sugestão foi gerada, retornando lista vazia")
+        
+        return LembrancaResponse(sugestoes=sugestoes)
+        
+    except Exception as e:
+        print(f"❌ Erro ao gerar sugestões: {e}")
+        import traceback
+        traceback.print_exc()
+        # Retornar lista vazia em caso de erro
+        return LembrancaResponse(sugestoes=[])
 
 if __name__ == "__main__":
     import uvicorn

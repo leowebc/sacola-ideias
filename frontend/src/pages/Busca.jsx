@@ -16,14 +16,23 @@ function Busca() {
   const [titulosSugeridos, setTitulosSugeridos] = useState([])
   const [tagsSugeridas, setTagsSugeridas] = useState([])
   const timeoutRef = useRef(null)
+  const buscarAbortControllerRef = useRef(null)
 
   useEffect(() => {
     // Backend gerencia API Key, sempre assume que busca semântica está disponível
     setApiKey(true) // Indica que busca semântica pode estar ativa (backend decide)
 
-    // Carregar todas as ideias inicialmente
-    carregarIdeias()
+    // Apenas carrega sugestões (não traz mais a lista completa)
     carregarSugestoes().catch(err => console.error('Erro ao carregar sugestões:', err))
+
+    return () => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current)
+      }
+      if (buscarAbortControllerRef.current) {
+        buscarAbortControllerRef.current.abort()
+      }
+    }
   }, [])
 
   const carregarSugestoes = async () => {
@@ -46,22 +55,6 @@ function Busca() {
     }
   }
 
-  const carregarIdeias = async () => {
-    try {
-      const { buscarTodasIdeias } = await import('../services/dbService')
-      const ideias = await buscarTodasIdeias()
-      setResultados(ideias.map(ideia => ({ ideia, similaridade: null })))
-      // Limpar localStorage quando conseguir buscar do banco
-      localStorage.removeItem('sacola_ideias')
-    } catch (error) {
-      console.error('Erro ao carregar ideias:', error)
-      // Limpar localStorage quando houver erro para não mostrar dados antigos
-      localStorage.removeItem('sacola_ideias')
-      // Mostrar vazio
-      setResultados([])
-    }
-  }
-
   const handleBusca = async (e) => {
     const termo = e.target.value
     setTermoBusca(termo)
@@ -70,25 +63,38 @@ function Busca() {
     if (timeoutRef.current) {
       clearTimeout(timeoutRef.current)
     }
+    if (buscarAbortControllerRef.current) {
+      buscarAbortControllerRef.current.abort()
+    }
 
     if (!termo.trim()) {
-      await carregarIdeias()
+      setBuscando(false)
+      setResultados([])
       return
     }
 
     // Debounce: aguardar 500ms após parar de digitar
     setBuscando(true)
     timeoutRef.current = setTimeout(async () => {
+      const controller = new AbortController()
+      buscarAbortControllerRef.current = controller
+
       try {
         // Backend gera embedding automaticamente, não precisa de API Key no frontend
-        const resultadosBusca = await buscarPorSimilaridade(termo, null)
+        const resultadosBusca = await buscarPorSimilaridade(termo, null, { signal: controller.signal })
         setResultados(resultadosBusca)
       } catch (error) {
+        if (error.name === 'AbortError') {
+          return
+        }
         console.error('Erro na busca:', error)
         // Não usar fallback - mostrar vazio quando houver erro
         setResultados([])
       } finally {
-        setBuscando(false)
+        if (buscarAbortControllerRef.current === controller) {
+          buscarAbortControllerRef.current = null
+          setBuscando(false)
+        }
       }
     }, 500)
   }
@@ -166,7 +172,7 @@ function Busca() {
       
       // Recarregar lista completa se não houver termo de busca
       if (!termoBusca.trim()) {
-        await carregarIdeias()
+        setResultados([])
       }
       
       // Recarregar sugestões
@@ -310,10 +316,10 @@ function Busca() {
                     </div>
                     <div>
                       <p className="text-xl font-semibold text-gray-900 mb-2">
-                        {t('busca.semResultadosTitulo')}
+                        {t('busca.semResultadosBuscaTitulo')}
                       </p>
                       <p className="text-gray-500">
-                        {t('busca.semResultadosHint')}
+                        {t('busca.semResultadosBuscaHint')}
                       </p>
                     </div>
                   </>
