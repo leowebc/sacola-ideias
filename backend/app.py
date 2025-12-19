@@ -67,24 +67,15 @@ async def startup_event():
     print("=" * 80)
     print("📋 TODOS OS ENDPOINTS REGISTRADOS:")
     total_routes = 0
-    auth_routes = []
     lembrancas_routes = []
     for route in app.routes:
         if hasattr(route, 'path'):
             total_routes += 1
             methods = getattr(route, 'methods', set())
-            path = route.path
-            if 'auth' in path:
-                auth_routes.append(f"{list(methods)} {path}")
-            if 'lembrancas' in path:
-                lembrancas_routes.append(f"{list(methods)} {path}")
-            print(f"   ✅ {list(methods)} {path}")
+            if 'lembrancas' in route.path:
+                lembrancas_routes.append(f"{list(methods)} {route.path}")
+                print(f"   ✅ {list(methods)} {route.path}")
     print(f"📊 Total de rotas: {total_routes}")
-    print(f"🔐 Endpoints de autenticação: {len(auth_routes)}")
-    if 'alterar-senha' in str(auth_routes):
-        print("✅ Endpoint /api/auth/alterar-senha encontrado!")
-    else:
-        print("❌ Endpoint /api/auth/alterar-senha NÃO encontrado!")
     if lembrancas_routes:
         print("✅ Endpoints de lembranças encontrados!")
     else:
@@ -1252,7 +1243,6 @@ async def alterar_senha(dados: AlterarSenhaRequest, user: dict = Depends(obter_u
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # Buscar usuário e verificar senha atual
             cur.execute("""
                 SELECT id, email, senha_hash, metodo_auth
                 FROM usuarios 
@@ -1263,18 +1253,14 @@ async def alterar_senha(dados: AlterarSenhaRequest, user: dict = Depends(obter_u
             if not usuario:
                 raise HTTPException(status_code=404, detail="Usuário não encontrado")
             
-            # Verificar se usuário tem senha (não é login apenas por Google)
             if not usuario.get("senha_hash"):
                 raise HTTPException(status_code=400, detail="Usuário não possui senha cadastrada (login apenas por Google)")
             
-            # Verificar senha atual
             if not verificar_senha(dados.senha_atual, usuario["senha_hash"]):
                 raise HTTPException(status_code=401, detail="Senha atual incorreta")
             
-            # Gerar hash da nova senha
             nova_senha_hash = hash_senha(dados.nova_senha)
             
-            # Atualizar senha no banco
             cur.execute("""
                 UPDATE usuarios 
                 SET senha_hash = %s
@@ -1282,7 +1268,6 @@ async def alterar_senha(dados: AlterarSenhaRequest, user: dict = Depends(obter_u
             """, (nova_senha_hash, user["user_id"]))
             
             conn.commit()
-            
             return {"message": "Senha alterada com sucesso"}
     except HTTPException:
         raise

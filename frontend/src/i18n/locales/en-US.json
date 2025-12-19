@@ -121,17 +121,6 @@
     "fechar": "Close",
     "tooltip": "Search for memories that aren't registered - AI will help you remember!"
   },
-  "nav": {
-    "title": "Ideas Bag",
-    "subtitle": "Intelligent Notes System",
-    "cadastrar": "Register",
-    "buscar": "Search",
-    "faleConosco": "Contact Us",
-    "limpar": "Clear localStorage?",
-    "limparDesc": "Clear old localStorage data? (API key will be preserved)",
-    "limparSuccess": "LocalStorage cleared!",
-    "idioma": "Language"
-  },
   "settings": {
     "menu": "Settings",
     "faleConosco": "Contact Us",
@@ -155,6 +144,17 @@
     "validacao": "Please fill in all fields.",
     "senhasNaoConferem": "Passwords do not match",
     "senhaMinima": "Password must be at least 6 characters"
+  },
+  "nav": {
+    "title": "Ideas Bag",
+    "subtitle": "Intelligent Notes System",
+    "cadastrar": "Register",
+    "buscar": "Search",
+    "faleConosco": "Contact Us",
+    "limpar": "Clear localStorage?",
+    "limparDesc": "Clear old localStorage data? (API key will be preserved)",
+    "limparSuccess": "LocalStorage cleared!",
+    "idioma": "Language"
   }
 }
 
