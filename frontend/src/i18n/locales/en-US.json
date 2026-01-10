@@ -121,30 +121,6 @@
     "fechar": "Close",
     "tooltip": "Search for memories that aren't registered - AI will help you remember!"
   },
-  "settings": {
-    "menu": "Settings",
-    "faleConosco": "Contact Us",
-    "alterarSenha": "Change Password",
-    "sair": "Logout"
-  },
-  "alterarSenha": {
-    "titulo": "Change Password",
-    "subtitulo": "Update your access password",
-    "senhaAtual": "Current Password",
-    "senhaAtualPlaceholder": "Enter your current password",
-    "novaSenha": "New Password",
-    "novaSenhaPlaceholder": "Enter your new password (minimum 6 characters)",
-    "confirmarSenha": "Confirm New Password",
-    "confirmarSenhaPlaceholder": "Enter your new password again",
-    "salvar": "Save New Password",
-    "salvando": "Saving...",
-    "success": "Password changed successfully!",
-    "error": "Error changing password",
-    "errorDesc": "Please check if the current password is correct and try again.",
-    "validacao": "Please fill in all fields.",
-    "senhasNaoConferem": "Passwords do not match",
-    "senhaMinima": "Password must be at least 6 characters"
-  },
   "nav": {
     "title": "Ideas Bag",
     "subtitle": "Intelligent Notes System",
