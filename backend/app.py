@@ -197,6 +197,11 @@ class BuscaResponse(BaseModel):
     data: datetime
     similarity: float
 
+class BackfillEmbeddingsRequest(BaseModel):
+    limite: Optional[int] = 50
+    forcar: Optional[bool] = False
+
+
 class AcessoCreate(BaseModel):
     usuario_id: Optional[int] = None
     ip_address: Optional[str] = None
@@ -769,6 +774,24 @@ def buscar_por_similaridade(busca: BuscaRequest, user: dict = Depends(obter_usua
             if resultados:
                 return [dict(resultado) for resultado in resultados]
 
+            # Segunda passada semantica mais flexivel
+            cur.execute("""
+                SELECT 
+                    id,
+                    titulo,
+                    tag,
+                    ideia,
+                    data,
+                    1 - (embedding <=> %s::vector) AS similarity
+                FROM ideias
+                WHERE usuario_id = %s AND embedding IS NOT NULL
+                ORDER BY embedding <=> %s::vector
+                LIMIT %s
+            """, (embedding_str, usuario_id, embedding_str, limite))
+            resultados = cur.fetchall()
+            if resultados:
+                return [dict(resultado) for resultado in resultados]
+
             # Fallback textual quando a busca semantica nao retorna nada
             termo = busca.termo.lower()
             cur.execute("""
@@ -793,6 +816,73 @@ def buscar_por_similaridade(busca: BuscaRequest, user: dict = Depends(obter_usua
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro na busca por similaridade: {str(e)}")
+    finally:
+        conn.close()
+
+@app.post("/api/ideias/embeddings/backfill")
+def backfill_embeddings(payload: BackfillEmbeddingsRequest, user: dict = Depends(obter_usuario_atual)):
+    """Backfill embeddings das ideias sem vetor (apenas do usuario autenticado)"""
+    if not user:
+        raise HTTPException(status_code=401, detail="Nao autenticado")
+    
+    usuario_id = user["user_id"]
+    limite = payload.limite if payload.limite and payload.limite > 0 else 50
+    limite = min(max(limite, 1), 200)
+    forcar = bool(payload.forcar)
+
+    modelo = get_embeddings_model()
+    if not modelo:
+        raise HTTPException(status_code=400, detail="Modelo de embeddings indisponivel (OPENAI_API_KEY nao configurada)")
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if forcar:
+                cur.execute("""
+                    SELECT id, titulo, tag, ideia
+                    FROM ideias
+                    WHERE usuario_id = %s
+                    ORDER BY data DESC
+                    LIMIT %s
+                """, (usuario_id, limite))
+            else:
+                cur.execute("""
+                    SELECT id, titulo, tag, ideia
+                    FROM ideias
+                    WHERE usuario_id = %s AND embedding IS NULL
+                    ORDER BY data DESC
+                    LIMIT %s
+                """, (usuario_id, limite))
+            ideias = cur.fetchall()
+            if not ideias:
+                return {"total": 0, "updated": 0, "skipped": 0, "ids": []}
+
+            updated_ids = []
+            skipped = 0
+            for ideia in ideias:
+                texto = f"{ideia['titulo']} {ideia.get('tag') or ''} {ideia['ideia']}".strip()
+                embedding = gerar_embedding(texto)
+                if not embedding:
+                    skipped += 1
+                    continue
+                embedding_str = "[" + ",".join(map(str, embedding)) + "]"
+                cur.execute(
+                    "UPDATE ideias SET embedding = %s::vector, updated_at = NOW() WHERE id = %s AND usuario_id = %s",
+                    (embedding_str, ideia["id"], usuario_id)
+                )
+                updated_ids.append(ideia["id"])
+            conn.commit()
+            return {
+                "total": len(ideias),
+                "updated": len(updated_ids),
+                "skipped": skipped,
+                "ids": updated_ids
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao fazer backfill de embeddings: {str(e)}")
     finally:
         conn.close()
 
