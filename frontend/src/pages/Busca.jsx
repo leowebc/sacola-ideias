@@ -338,7 +338,8 @@ function Busca() {
                   </span>
                 )}
               </div>
-              {resultados.map((resultado) => {
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {resultados.map((resultado) => {
                 const ideia = resultado.ideia || resultado
                 const similaridade = resultado.similaridade !== undefined ? resultado.similaridade : null
                 return (
@@ -392,6 +393,7 @@ function Busca() {
                 </div>
                 )
               })}
+              </div>
             </>
           )}
         </div>
