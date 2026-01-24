@@ -766,6 +766,28 @@ def buscar_por_similaridade(busca: BuscaRequest, user: dict = Depends(obter_usua
                 LIMIT %s
             """, (embedding_str, usuario_id, embedding_str, embedding_str, limite))
             resultados = cur.fetchall()
+            if resultados:
+                return [dict(resultado) for resultado in resultados]
+
+            # Fallback textual quando a busca semantica nao retorna nada
+            termo = busca.termo.lower()
+            cur.execute("""
+                SELECT 
+                    id,
+                    titulo,
+                    tag,
+                    ideia,
+                    data,
+                    0.0 AS similarity
+                FROM ideias
+                WHERE usuario_id = %s
+                  AND (LOWER(titulo) LIKE %s 
+                   OR LOWER(tag) LIKE %s 
+                   OR LOWER(ideia) LIKE %s)
+                ORDER BY data DESC
+                LIMIT %s
+            """, (usuario_id, f'%{termo}%', f'%{termo}%', f'%{termo}%', limite))
+            resultados = cur.fetchall()
             return [dict(resultado) for resultado in resultados]
     except HTTPException:
         raise
