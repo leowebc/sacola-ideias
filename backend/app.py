@@ -53,6 +53,7 @@ PRO_LIMITE_BUSCAS = int(os.getenv("PRO_LIMITE_BUSCAS", "1000"))
 PRO_LIMITE_EMBEDDINGS = int(os.getenv("PRO_LIMITE_EMBEDDINGS", "1000"))
 FREE_LIMITE_BUSCAS = int(os.getenv("FREE_LIMITE_BUSCAS", "10"))
 FREE_LIMITE_EMBEDDINGS = int(os.getenv("FREE_LIMITE_EMBEDDINGS", "10"))
+TRIAL_DIAS = int(os.getenv("TRIAL_DIAS", "3"))
 
 if STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
@@ -376,7 +377,7 @@ def _trial_expira_em_from_row(row: Optional[dict]) -> Optional[datetime]:
         return exp
     criado = _parse_datetime(row.get("criado_em")) or _parse_datetime(row.get("created_at"))
     if criado:
-        return criado + timedelta(days=3)
+        return criado + timedelta(days=TRIAL_DIAS)
     return None
 
 
@@ -402,8 +403,8 @@ def _has_assinaturas_column(cur, column: str) -> bool:
 
 
 def _insert_trial_assinatura(cur, usuario_id: int) -> Optional[datetime]:
-    """Cria assinatura free com trial de 3 dias (se a coluna existir)."""
-    trial_expira = _now_utc() + timedelta(days=3)
+    """Cria assinatura free com trial configurável (se a coluna existir)."""
+    trial_expira = _now_utc() + timedelta(days=TRIAL_DIAS)
     if _has_assinaturas_column(cur, "trial_expira_em"):
         cur.execute(
             """
@@ -1068,6 +1069,68 @@ def _map_stripe_status(status):
     return ("free", "ativa", FREE_LIMITE_BUSCAS, FREE_LIMITE_EMBEDDINGS)
 
 
+def _get_first_assinaturas_column(cur, candidates):
+    for column in candidates:
+        if _has_assinaturas_column(cur, column):
+            return column
+    return None
+
+
+def _from_unix_timestamp(value):
+    try:
+        if value is None:
+            return None
+        return datetime.fromtimestamp(int(value), tz=timezone.utc)
+    except Exception:
+        return None
+
+
+def _find_usuario_id_by_stripe_customer(cur, customer_id):
+    if not customer_id:
+        return None
+    column = _get_first_assinaturas_column(cur, ["stripe_customer_id", "stripe_customer"])
+    if not column:
+        return None
+    cur.execute(
+        f"SELECT usuario_id FROM assinaturas WHERE {column} = %s ORDER BY id DESC LIMIT 1",
+        (customer_id,),
+    )
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def _update_assinatura_extras(cur, usuario_id, stripe_subscription_id=None, stripe_customer_id=None, data_inicio=None, data_fim=None):
+    updates = []
+    values = []
+
+    subscription_column = _get_first_assinaturas_column(cur, ["stripe_subscription_id", "stripe_subscription"])
+    if stripe_subscription_id and subscription_column:
+        updates.append(f"{subscription_column} = %s")
+        values.append(stripe_subscription_id)
+
+    customer_column = _get_first_assinaturas_column(cur, ["stripe_customer_id", "stripe_customer"])
+    if stripe_customer_id and customer_column:
+        updates.append(f"{customer_column} = %s")
+        values.append(stripe_customer_id)
+
+    if data_inicio and _has_assinaturas_column(cur, "data_inicio"):
+        updates.append("data_inicio = %s")
+        values.append(data_inicio)
+
+    if data_fim and _has_assinaturas_column(cur, "data_fim"):
+        updates.append("data_fim = %s")
+        values.append(data_fim)
+
+    if not updates:
+        return
+
+    values.append(usuario_id)
+    cur.execute(
+        f"UPDATE assinaturas SET {', '.join(updates)} WHERE usuario_id = %s",
+        tuple(values),
+    )
+
+
 @app.post("/api/stripe/checkout-session")
 def criar_checkout_session(user: dict = Depends(obter_usuario_atual)):
     if not user:
@@ -1132,15 +1195,44 @@ async def stripe_webhook(request: Request):
     status = None
     limite_buscas = None
     limite_embeddings = None
+    stripe_subscription_id = None
+    stripe_customer_id = None
+    data_inicio = None
+    data_fim = None
 
     if event_type == "checkout.session.completed":
         usuario_id = data_obj.get("client_reference_id") or data_obj.get("metadata", {}).get("user_id")
         usuario_id = _parse_user_id(usuario_id)
         if usuario_id:
             plano, status, limite_buscas, limite_embeddings = _map_stripe_status("active")
+        stripe_subscription_id = data_obj.get("subscription")
+        stripe_customer_id = data_obj.get("customer")
+        data_inicio = _now_utc()
     elif event_type in ("customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"):
         usuario_id = data_obj.get("metadata", {}).get("user_id")
         usuario_id = _parse_user_id(usuario_id)
+        stripe_subscription_id = data_obj.get("id")
+        stripe_customer_id = data_obj.get("customer")
+        data_inicio = _from_unix_timestamp(data_obj.get("current_period_start"))
+        data_fim = _from_unix_timestamp(data_obj.get("current_period_end"))
+        if usuario_id:
+            plano, status, limite_buscas, limite_embeddings = _map_stripe_status(data_obj.get("status"))
+
+    if not usuario_id and stripe_customer_id and event_type in (
+        "customer.subscription.created",
+        "customer.subscription.updated",
+        "customer.subscription.deleted",
+    ):
+        conn = get_db_connection()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                usuario_id = _find_usuario_id_by_stripe_customer(cur, stripe_customer_id)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+        finally:
+            conn.close()
+
         if usuario_id:
             plano, status, limite_buscas, limite_embeddings = _map_stripe_status(data_obj.get("status"))
 
@@ -1149,6 +1241,14 @@ async def stripe_webhook(request: Request):
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 _upsert_assinatura(cur, usuario_id, plano, status, limite_buscas, limite_embeddings)
+                _update_assinatura_extras(
+                    cur,
+                    usuario_id,
+                    stripe_subscription_id=stripe_subscription_id,
+                    stripe_customer_id=stripe_customer_id,
+                    data_inicio=data_inicio,
+                    data_fim=data_fim,
+                )
                 conn.commit()
         except Exception as e:
             conn.rollback()

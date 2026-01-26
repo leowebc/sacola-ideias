@@ -1,3 +1,5 @@
+import { handleTrialExpired } from '../utils/subscription'
+
 // Serviço para comunicação com o banco de dados PostgreSQL
 // Esta é uma camada de abstração que pode ser usada com um backend API
 
@@ -71,19 +73,40 @@ async function fetchAPI(endpoint, options = {}) {
 
     // Verificar se a resposta é JSON
     const contentType = response.headers.get('content-type')
-    if (!contentType || !contentType.includes('application/json')) {
-      const text = await response.text()
-      console.error('❌ [fetchAPI] Resposta não é JSON:', text.substring(0, 200))
-      throw new Error(`Backend retornou resposta inválida: ${response.status} ${response.statusText}`)
-    }
+const isJson = contentType && contentType.includes('application/json')
+if (!isJson) {
+  const text = await response.text()
+  console.error('? [fetchAPI] Resposta n�o � JSON:', text.substring(0, 200))
+  throw new Error(`Backend retornou resposta inv�lida: ${response.status} ${response.statusText}`)
+}
 
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}))
-      console.error('❌ [fetchAPI] Erro na resposta:', errorData)
-      throw new Error(errorData.detail || `Erro na API: ${response.statusText} (${response.status})`)
-    }
+const data = await response.json().catch(() => ({}))
 
-    const data = await response.json()
+if (response.status === 402) {
+  const storedUser = localStorage.getItem('user')
+  let trialExpiraEm = null
+  if (storedUser) {
+    try {
+      trialExpiraEm = JSON.parse(storedUser)?.trial_expira_em || null
+    } catch (e) {
+      trialExpiraEm = null
+    }
+  }
+
+  await handleTrialExpired({
+    apiUrl: API_BASE_URL,
+    token,
+    trialExpiraEm,
+    detail: data?.detail,
+  })
+
+  throw new Error(data?.detail || 'Assinatura necessaria para continuar')
+}
+
+if (!response.ok) {
+  console.error('? [fetchAPI] Erro na resposta:', data)
+  throw new Error(data?.detail || `Erro na API: ${response.statusText} (${response.status})`)
+}
     console.log(`✅ [fetchAPI] Resposta OK:`, data)
     
     // Log adicional para POST de ideias
@@ -330,4 +353,6 @@ export async function atualizarEmbedding(id, embedding) {
     throw error
   }
 }
+
+
 

@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import LoginGoogle from '../components/LoginGoogle'
 import { showError, showSuccessToast } from '../utils/alerts'
+import { handleTrialExpired } from '../utils/subscription'
 
 const API_URL = (typeof window !== 'undefined' && window.API_URL)
   ? window.API_URL
@@ -56,24 +57,11 @@ function Login() {
         return
       }
 
-      const checkoutResponse = await fetch(`${API_URL}/stripe/checkout-session`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        }
+      await handleTrialExpired({
+        apiUrl: API_URL,
+        token,
+        trialExpiraEm: meData.trial_expira_em,
       })
-
-      const checkoutData = await checkoutResponse.json()
-      if (!checkoutResponse.ok) {
-        throw new Error(checkoutData.detail || 'Erro ao iniciar checkout')
-      }
-
-      if (!checkoutData.url) {
-        throw new Error('Checkout retornou URL invalida')
-      }
-
-      window.location.href = checkoutData.url
     } catch (err) {
       console.error('Erro no redirecionamento pos-auth:', err)
       showError('Erro ao iniciar assinatura', err.message || 'Nao foi possivel iniciar o checkout')
