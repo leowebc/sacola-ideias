@@ -14,6 +14,7 @@ from psycopg2.extras import RealDictCursor
 import os
 from dotenv import load_dotenv
 import stripe
+import traceback
 try:
     import stripe.checkout as stripe_checkout
 except Exception:
@@ -84,6 +85,15 @@ app = FastAPI(title="Sacola de Ideias API")
 @app.on_event("startup")
 async def startup_event():
     print("=" * 80)
+    # Diagnóstico rápido do Stripe (não expõe segredos)
+    try:
+        from stripe import _version as _stripe_version
+        print(f"💳 Stripe SDK: {_stripe_version.VERSION}")
+        print(f"   stripe module: {getattr(stripe, '__file__', 'n/a')}")
+        print(f"   checkout module: {getattr(stripe_checkout, '__file__', 'n/a')}")
+        print(f"   has stripe.apps.Secret: {hasattr(getattr(stripe, 'apps', None), 'Secret')}")
+    except Exception as e:
+        print(f"⚠️  Falha ao inspecionar Stripe SDK: {e}")
     print("📋 TODOS OS ENDPOINTS REGISTRADOS:")
     total_routes = 0
     lembrancas_routes = []
@@ -1092,6 +1102,8 @@ def criar_checkout_session(user: dict = Depends(obter_usuario_atual)):
 
         session = stripe_checkout.Session.create(**session_params)
     except Exception as e:
+        print("❌ Erro no checkout Stripe:")
+        print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Erro ao criar checkout: {str(e)}")
 
     return {"url": session.url}
