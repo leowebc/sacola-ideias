@@ -14,6 +14,10 @@ from psycopg2.extras import RealDictCursor
 import os
 from dotenv import load_dotenv
 import stripe
+try:
+    import stripe.checkout as stripe_checkout
+except Exception:
+    stripe_checkout = None
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from auth import (
     criar_token_jwt, 
@@ -1060,6 +1064,8 @@ def criar_checkout_session(user: dict = Depends(obter_usuario_atual)):
         raise HTTPException(status_code=401, detail="Nao autenticado")
     if not STRIPE_SECRET_KEY or not STRIPE_PRICE_ID:
         raise HTTPException(status_code=500, detail="Stripe nao configurado")
+    if not stripe_checkout or not getattr(stripe_checkout, "Session", None):
+        raise HTTPException(status_code=500, detail="Stripe SDK sem suporte a checkout")
 
     usuario_id = user.get("user_id")
     email = user.get("email") if isinstance(user, dict) else None
@@ -1084,7 +1090,7 @@ def criar_checkout_session(user: dict = Depends(obter_usuario_atual)):
         if email:
             session_params["customer_email"] = email
 
-        session = stripe.checkout.Session.create(**session_params)
+        session = stripe_checkout.Session.create(**session_params)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao criar checkout: {str(e)}")
 
