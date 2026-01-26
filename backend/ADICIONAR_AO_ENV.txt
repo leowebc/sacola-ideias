@@ -31,3 +31,26 @@ CONTATO_EMAIL=contato@sacoladeideias.com
 # GOOGLE_REDIRECT_URI=https://api.sacola-ideias.com/api/auth/google/callback
 # CONTATO_EMAIL=contato@sacoladeideias.com
 
+# =====================================================
+# STRIPE
+# =====================================================
+# Chave secreta do Stripe (use a de producao no Render)
+STRIPE_SECRET_KEY=
+
+# Price ID do plano mensal (ex: price_123...)
+STRIPE_PRICE_ID=
+
+# Webhook secret (copie do endpoint criado no Stripe)
+STRIPE_WEBHOOK_SECRET=
+
+# URLs de retorno do Checkout (opcional; se nao definir usa FRONTEND_URL)
+STRIPE_SUCCESS_URL=https://www.sacola-ideias.com/app?checkout=success
+STRIPE_CANCEL_URL=https://www.sacola-ideias.com/app?checkout=cancel
+
+# Limites do plano pro (opcional)
+PRO_LIMITE_BUSCAS=1000
+PRO_LIMITE_EMBEDDINGS=1000
+
+# Limites do plano free (opcional)
+FREE_LIMITE_BUSCAS=10
+FREE_LIMITE_EMBEDDINGS=10

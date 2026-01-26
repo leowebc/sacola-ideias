@@ -8,11 +8,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
 from dotenv import load_dotenv
+import stripe
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from auth import (
     criar_token_jwt, 
@@ -36,6 +37,20 @@ CONTATO_EMAIL = os.getenv("CONTATO_EMAIL", "contato@sacoladeideias.com")
 
 # Configurar embeddings (usa API Key do .env)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# Stripe
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+STRIPE_PRICE_ID = os.getenv("STRIPE_PRICE_ID")
+STRIPE_SUCCESS_URL = os.getenv("STRIPE_SUCCESS_URL", f"{FRONTEND_URL}/app?checkout=success")
+STRIPE_CANCEL_URL = os.getenv("STRIPE_CANCEL_URL", f"{FRONTEND_URL}/app?checkout=cancel")
+PRO_LIMITE_BUSCAS = int(os.getenv("PRO_LIMITE_BUSCAS", "1000"))
+PRO_LIMITE_EMBEDDINGS = int(os.getenv("PRO_LIMITE_EMBEDDINGS", "1000"))
+FREE_LIMITE_BUSCAS = int(os.getenv("FREE_LIMITE_BUSCAS", "10"))
+FREE_LIMITE_EMBEDDINGS = int(os.getenv("FREE_LIMITE_EMBEDDINGS", "10"))
+
+if STRIPE_SECRET_KEY:
+    stripe.api_key = STRIPE_SECRET_KEY
 embeddings_model = None
 
 def get_embeddings_model():
@@ -296,13 +311,132 @@ async def obter_usuario_atual(request: Request) -> dict:
     print("=" * 80)
     return payload
 
+# -----------------------------------------------------
+# Assinaturas / Trial (3 dias) - helpers
+# -----------------------------------------------------
+def _parse_datetime(value):
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        text = str(value)
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        return datetime.fromisoformat(text)
+    except Exception:
+        return None
+
+
+def _now_utc():
+    return datetime.now(timezone.utc)
+
+
+def _is_expired(dt_value: Optional[datetime]) -> bool:
+    if not dt_value:
+        return True
+    if dt_value.tzinfo:
+        return dt_value < _now_utc()
+    return dt_value < datetime.utcnow()
+
+
+def _get_assinatura_row(usuario_id: int) -> Optional[dict]:
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT * FROM assinaturas WHERE usuario_id = %s ORDER BY id DESC LIMIT 1",
+                (usuario_id,),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def _trial_expira_em_from_row(row: Optional[dict]) -> Optional[datetime]:
+    if not row:
+        return None
+    exp = _parse_datetime(row.get("trial_expira_em"))
+    if exp:
+        return exp
+    criado = _parse_datetime(row.get("criado_em")) or _parse_datetime(row.get("created_at"))
+    if criado:
+        return criado + timedelta(days=3)
+    return None
+
+
+def _assinatura_ativa(row: Optional[dict]) -> bool:
+    if not row:
+        return False
+    plano = (row.get("plano") or "").lower()
+    status = (row.get("status") or "").lower()
+    if plano == "pro" and status in ("ativa", "active", "trialing"):
+        return True
+    if plano == "free":
+        exp = _trial_expira_em_from_row(row)
+        return exp is not None and not _is_expired(exp)
+    return False
+
+
+def _has_assinaturas_column(cur, column: str) -> bool:
+    cur.execute(
+        "SELECT 1 FROM information_schema.columns WHERE table_name = 'assinaturas' AND column_name = %s",
+        (column,),
+    )
+    return cur.fetchone() is not None
+
+
+def _insert_trial_assinatura(cur, usuario_id: int) -> Optional[datetime]:
+    """Cria assinatura free com trial de 3 dias (se a coluna existir)."""
+    trial_expira = _now_utc() + timedelta(days=3)
+    if _has_assinaturas_column(cur, "trial_expira_em"):
+        cur.execute(
+            """
+            INSERT INTO assinaturas (usuario_id, plano, status, limite_buscas, limite_embeddings, trial_expira_em)
+            VALUES (%s, 'free', 'trial', %s, %s, %s)
+            """,
+            (usuario_id, FREE_LIMITE_BUSCAS, FREE_LIMITE_EMBEDDINGS, trial_expira),
+        )
+        return trial_expira
+    cur.execute(
+        """
+        INSERT INTO assinaturas (usuario_id, plano, status, limite_buscas, limite_embeddings)
+        VALUES (%s, 'free', 'trial', %s, %s)
+        """,
+        (usuario_id, FREE_LIMITE_BUSCAS, FREE_LIMITE_EMBEDDINGS),
+    )
+    return None
+
+
+async def obter_usuario_assinante(user: dict = Depends(obter_usuario_atual)) -> dict:
+    """Permite acesso somente se assinatura estiver ativa (pro) ou trial válido."""
+    if not user:
+        raise HTTPException(status_code=401, detail="Não autenticado")
+    role = (user.get("role") or "").lower()
+    if role in ("admin", "superadmin"):
+        return user
+
+    usuario_id = user.get("user_id")
+    if not usuario_id:
+        raise HTTPException(status_code=401, detail="Token inválido")
+
+    assinatura = _get_assinatura_row(usuario_id)
+    if _assinatura_ativa(assinatura):
+        return user
+
+    raise HTTPException(
+        status_code=402,
+        detail="Trial expirado. Ative o plano Pro para continuar.",
+    )
+
 # Rotas
 @app.get("/")
 def root():
     return {"message": "Sacola de Ideias API", "status": "online"}
 
 @app.get("/api/ideias", response_model=List[IdeiaResponse])
-def buscar_todas_ideias(user: dict = Depends(obter_usuario_atual)):
+def buscar_todas_ideias(user: dict = Depends(obter_usuario_assinante)):
     """Buscar todas as ideias do usuário autenticado"""
     if not user:
         print("❌ ERRO: Tentativa de buscar ideias sem autenticação!")
@@ -375,7 +509,7 @@ def buscar_todas_ideias(user: dict = Depends(obter_usuario_atual)):
             conn.close()
 
 @app.get("/api/ideias/{ideia_id}", response_model=IdeiaResponse)
-def buscar_ideia_por_id(ideia_id: int, user: dict = Depends(obter_usuario_atual)):
+def buscar_ideia_por_id(ideia_id: int, user: dict = Depends(obter_usuario_assinante)):
     """Buscar ideia por ID (apenas do usuário autenticado)"""
     if not user:
         raise HTTPException(status_code=401, detail="Não autenticado")
@@ -397,7 +531,7 @@ def buscar_ideia_por_id(ideia_id: int, user: dict = Depends(obter_usuario_atual)
         conn.close()
 
 @app.post("/api/ideias", response_model=IdeiaResponse)
-async def criar_ideia(ideia: IdeiaCreate, request: Request, user: dict = Depends(obter_usuario_atual)):
+async def criar_ideia(ideia: IdeiaCreate, request: Request, user: dict = Depends(obter_usuario_assinante)):
     """Criar nova ideia com embedding automático (associada ao usuário)"""
     import sys
     sys.stdout.flush()  # Forçar saída imediata
@@ -532,7 +666,7 @@ async def criar_ideia(ideia: IdeiaCreate, request: Request, user: dict = Depends
             conn.close()
 
 @app.post("/api/ideias/com-embedding", response_model=IdeiaResponse)
-def criar_ideia_com_embedding(dados: IdeiaComEmbedding, user: dict = Depends(obter_usuario_atual)):
+def criar_ideia_com_embedding(dados: IdeiaComEmbedding, user: dict = Depends(obter_usuario_assinante)):
     """Criar ideia com embedding (associada ao usuário)"""
     print("=" * 80)
     print("📝 NOVA REQUISIÇÃO: Criar Ideia COM Embedding")
@@ -606,7 +740,7 @@ def criar_ideia_com_embedding(dados: IdeiaComEmbedding, user: dict = Depends(obt
             conn.close()
 
 @app.put("/api/ideias/{ideia_id}", response_model=IdeiaResponse)
-def atualizar_ideia(ideia_id: int, ideia: IdeiaUpdate, user: dict = Depends(obter_usuario_atual)):
+def atualizar_ideia(ideia_id: int, ideia: IdeiaUpdate, user: dict = Depends(obter_usuario_assinante)):
     """Atualizar ideia existente (apenas do usuário autenticado)"""
     if not user:
         raise HTTPException(status_code=401, detail="Não autenticado")
@@ -662,7 +796,7 @@ def atualizar_ideia(ideia_id: int, ideia: IdeiaUpdate, user: dict = Depends(obte
         conn.close()
 
 @app.put("/api/ideias/{ideia_id}/embedding")
-def atualizar_embedding(ideia_id: int, embedding: List[float]):
+def atualizar_embedding(ideia_id: int, embedding: List[float], user: dict = Depends(obter_usuario_assinante)):
     """Atualizar embedding de uma ideia"""
     conn = get_db_connection()
     try:
@@ -686,7 +820,7 @@ def atualizar_embedding(ideia_id: int, embedding: List[float]):
         conn.close()
 
 @app.delete("/api/ideias/{ideia_id}")
-def deletar_ideia(ideia_id: int, user: dict = Depends(obter_usuario_atual)):
+def deletar_ideia(ideia_id: int, user: dict = Depends(obter_usuario_assinante)):
     """Deletar ideia (apenas do usuário autenticado)"""
     if not user:
         raise HTTPException(status_code=401, detail="Não autenticado")
@@ -709,7 +843,7 @@ def deletar_ideia(ideia_id: int, user: dict = Depends(obter_usuario_atual)):
         conn.close()
 
 @app.post("/api/ideias/buscar", response_model=List[BuscaResponse])
-def buscar_por_similaridade(busca: BuscaRequest, user: dict = Depends(obter_usuario_atual)):
+def buscar_por_similaridade(busca: BuscaRequest, user: dict = Depends(obter_usuario_assinante)):
     """Buscar ideias por similaridade (apenas do usuário autenticado)"""
     if not user:
         raise HTTPException(status_code=401, detail="Não autenticado")
@@ -820,7 +954,7 @@ def buscar_por_similaridade(busca: BuscaRequest, user: dict = Depends(obter_usua
         conn.close()
 
 @app.post("/api/ideias/embeddings/backfill")
-def backfill_embeddings(payload: BackfillEmbeddingsRequest, user: dict = Depends(obter_usuario_atual)):
+def backfill_embeddings(payload: BackfillEmbeddingsRequest, user: dict = Depends(obter_usuario_assinante)):
     """Backfill embeddings das ideias sem vetor (apenas do usuario autenticado)"""
     if not user:
         raise HTTPException(status_code=401, detail="Nao autenticado")
@@ -886,6 +1020,126 @@ def backfill_embeddings(payload: BackfillEmbeddingsRequest, user: dict = Depends
     finally:
         conn.close()
 
+
+# =============================
+# Stripe - Checkout e Webhook
+# =============================
+
+
+def _parse_user_id(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _upsert_assinatura(cur, usuario_id, plano, status, limite_buscas, limite_embeddings):
+    cur.execute("SELECT id FROM assinaturas WHERE usuario_id = %s", (usuario_id,))
+    if cur.fetchone():
+        cur.execute("""
+            UPDATE assinaturas
+            SET plano = %s, status = %s, limite_buscas = %s, limite_embeddings = %s
+            WHERE usuario_id = %s
+        """, (plano, status, limite_buscas, limite_embeddings, usuario_id))
+    else:
+        cur.execute("""
+            INSERT INTO assinaturas (usuario_id, plano, status, limite_buscas, limite_embeddings)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (usuario_id, plano, status, limite_buscas, limite_embeddings))
+
+
+def _map_stripe_status(status):
+    if status in ("active", "trialing"):
+        return ("pro", "ativa", PRO_LIMITE_BUSCAS, PRO_LIMITE_EMBEDDINGS)
+    return ("free", "ativa", FREE_LIMITE_BUSCAS, FREE_LIMITE_EMBEDDINGS)
+
+
+@app.post("/api/stripe/checkout-session")
+def criar_checkout_session(user: dict = Depends(obter_usuario_atual)):
+    if not user:
+        raise HTTPException(status_code=401, detail="Nao autenticado")
+    if not STRIPE_SECRET_KEY or not STRIPE_PRICE_ID:
+        raise HTTPException(status_code=500, detail="Stripe nao configurado")
+
+    usuario_id = user.get("user_id")
+    email = user.get("email") if isinstance(user, dict) else None
+    usuario_id = _parse_user_id(usuario_id)
+    if not usuario_id:
+        raise HTTPException(status_code=400, detail="Usuario invalido")
+
+    success_url = STRIPE_SUCCESS_URL
+    sep = "&" if "?" in success_url else "?"
+    success_url = f"{success_url}{sep}session_id={{CHECKOUT_SESSION_ID}}"
+
+    try:
+        session_params = {
+            "mode": "subscription",
+            "line_items": [{"price": STRIPE_PRICE_ID, "quantity": 1}],
+            "success_url": success_url,
+            "cancel_url": STRIPE_CANCEL_URL,
+            "client_reference_id": str(usuario_id),
+            "subscription_data": {"metadata": {"user_id": str(usuario_id)}},
+            "metadata": {"user_id": str(usuario_id), "email": email or ""}
+        }
+        if email:
+            session_params["customer_email"] = email
+
+        session = stripe.checkout.Session.create(**session_params)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao criar checkout: {str(e)}")
+
+    return {"url": session.url}
+
+
+@app.post("/api/stripe/webhook")
+async def stripe_webhook(request: Request):
+    if not STRIPE_WEBHOOK_SECRET:
+        raise HTTPException(status_code=500, detail="Stripe webhook secret nao configurado")
+
+    payload = await request.body()
+    sig_header = request.headers.get("Stripe-Signature") or request.headers.get("stripe-signature")
+    if not sig_header:
+        raise HTTPException(status_code=400, detail="Stripe-Signature ausente")
+
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Webhook invalido: {str(e)}")
+
+    event_type = event.get("type")
+    data_obj = event.get("data", {}).get("object", {})
+
+    usuario_id = None
+    plano = None
+    status = None
+    limite_buscas = None
+    limite_embeddings = None
+
+    if event_type == "checkout.session.completed":
+        usuario_id = data_obj.get("client_reference_id") or data_obj.get("metadata", {}).get("user_id")
+        usuario_id = _parse_user_id(usuario_id)
+        if usuario_id:
+            plano, status, limite_buscas, limite_embeddings = _map_stripe_status("active")
+    elif event_type in ("customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"):
+        usuario_id = data_obj.get("metadata", {}).get("user_id")
+        usuario_id = _parse_user_id(usuario_id)
+        if usuario_id:
+            plano, status, limite_buscas, limite_embeddings = _map_stripe_status(data_obj.get("status"))
+
+    if usuario_id and plano and status:
+        conn = get_db_connection()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                _upsert_assinatura(cur, usuario_id, plano, status, limite_buscas, limite_embeddings)
+                conn.commit()
+        except Exception as e:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail=f"Erro ao atualizar assinatura: {str(e)}")
+        finally:
+            conn.close()
+
+    return {"received": True}
+
 @app.post("/api/auth/register", response_model=UserResponse)
 def registrar_usuario(register_data: RegisterRequest):
     """Registrar novo usuário (email/senha)"""
@@ -919,11 +1173,8 @@ def registrar_usuario(register_data: RegisterRequest):
             usuario = cur.fetchone()
             usuario_id = usuario["id"]
             
-            # Criar assinatura free
-            cur.execute("""
-                INSERT INTO assinaturas (usuario_id, plano, status, limite_buscas, limite_embeddings)
-                VALUES (%s, 'free', 'ativa', 10, 10)
-            """, (usuario_id,))
+            # Criar assinatura free com trial de 3 dias
+            _insert_trial_assinatura(cur, usuario_id)
             
             conn.commit()
             
@@ -1146,13 +1397,10 @@ async def google_callback(auth_request: GoogleAuthRequest):
                     # Criar assinatura free se não tiver
                     cur.execute("""
                         SELECT id FROM assinaturas 
-                        WHERE usuario_id = %s AND status = 'ativa'
+                        WHERE usuario_id = %s AND status IN ('ativa', 'trial', 'active', 'trialing')
                     """, (usuario_id,))
                     if not cur.fetchone():
-                        cur.execute("""
-                            INSERT INTO assinaturas (usuario_id, plano, status, limite_buscas, limite_embeddings)
-                            VALUES (%s, 'free', 'ativa', 10, 10)
-                        """, (usuario_id,))
+                        _insert_trial_assinatura(cur, usuario_id)
                 else:
                     # Criar novo usuário
                     cur.execute("""
@@ -1164,10 +1412,7 @@ async def google_callback(auth_request: GoogleAuthRequest):
                     usuario_id = cur.fetchone()["id"]
                     
                     # Criar assinatura free para novo usuário
-                    cur.execute("""
-                        INSERT INTO assinaturas (usuario_id, plano, status, limite_buscas, limite_embeddings)
-                        VALUES (%s, 'free', 'ativa', 10, 10)
-                    """, (usuario_id,))
+                    _insert_trial_assinatura(cur, usuario_id)
                 
                 conn.commit()
                 
@@ -1250,13 +1495,10 @@ async def google_callback_get(code: str = Query(...), error: Optional[str] = Que
                     # Criar assinatura free se não tiver
                     cur.execute("""
                         SELECT id FROM assinaturas 
-                        WHERE usuario_id = %s AND status = 'ativa'
+                        WHERE usuario_id = %s AND status IN ('ativa', 'trial', 'active', 'trialing')
                     """, (usuario_id,))
                     if not cur.fetchone():
-                        cur.execute("""
-                            INSERT INTO assinaturas (usuario_id, plano, status, limite_buscas, limite_embeddings)
-                            VALUES (%s, 'free', 'ativa', 10, 10)
-                        """, (usuario_id,))
+                        _insert_trial_assinatura(cur, usuario_id)
                 else:
                     # Criar novo usuário
                     cur.execute("""
@@ -1268,10 +1510,7 @@ async def google_callback_get(code: str = Query(...), error: Optional[str] = Que
                     usuario_id = cur.fetchone()["id"]
                     
                     # Criar assinatura free para novo usuário
-                    cur.execute("""
-                        INSERT INTO assinaturas (usuario_id, plano, status, limite_buscas, limite_embeddings)
-                        VALUES (%s, 'free', 'ativa', 10, 10)
-                    """, (usuario_id,))
+                    _insert_trial_assinatura(cur, usuario_id)
                 
                 conn.commit()
                 
@@ -1330,16 +1569,59 @@ async def obter_usuario_logado(user: dict = Depends(obter_usuario_atual)):
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
-                SELECT id, email, nome, foto_url, metodo_auth, role
-                FROM usuarios 
-                WHERE id = %s
+                SELECT 
+                    u.id,
+                    u.email,
+                    u.nome,
+                    u.foto_url,
+                    u.metodo_auth,
+                    u.role,
+                    a.plano,
+                    a.status,
+                    a.limite_buscas,
+                    a.limite_embeddings
+                FROM usuarios u
+                LEFT JOIN LATERAL (
+                    SELECT plano, status, limite_buscas, limite_embeddings
+                    FROM assinaturas
+                    WHERE usuario_id = u.id
+                    ORDER BY id DESC
+                    LIMIT 1
+                ) a ON true
+                WHERE u.id = %s
             """, (user["user_id"],))
             usuario = cur.fetchone()
             
             if not usuario:
                 raise HTTPException(status_code=404, detail="Usuário não encontrado")
             
-            return dict(usuario)
+            # Buscar assinatura completa para checar trial (3 dias)
+            cur.execute("""
+                SELECT * FROM assinaturas
+                WHERE usuario_id = %s
+                ORDER BY id DESC
+                LIMIT 1
+            """, (user["user_id"],))
+            assinatura_row = cur.fetchone()
+
+            response = dict(usuario)
+            if assinatura_row:
+                # Sobrescrever com valores mais recentes
+                response["plano"] = assinatura_row.get("plano", response.get("plano"))
+                response["status"] = assinatura_row.get("status", response.get("status"))
+                response["limite_buscas"] = assinatura_row.get("limite_buscas", response.get("limite_buscas"))
+                response["limite_embeddings"] = assinatura_row.get("limite_embeddings", response.get("limite_embeddings"))
+
+                trial_expira = _trial_expira_em_from_row(assinatura_row)
+                plano_atual = (response.get("plano") or "").lower()
+                trial_ativo = plano_atual == "free" and trial_expira and not _is_expired(trial_expira)
+                response["trial_expira_em"] = trial_expira.isoformat() if trial_expira else None
+                response["trial_ativo"] = trial_ativo
+            else:
+                response["trial_expira_em"] = None
+                response["trial_ativo"] = False
+
+            return response
     finally:
         conn.close()
 
@@ -1667,4 +1949,3 @@ if __name__ == "__main__":
     PORT = 8002  # Mudar para 8002 se 8001 estiver ocupada
     print(f"🚀 Servidor rodando na porta {PORT}")
     uvicorn.run(app, host="0.0.0.0", port=PORT)
-

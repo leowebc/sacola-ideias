@@ -4,7 +4,7 @@
 
 // Se window.API_URL não estiver definido, o código usará VITE_API_URL ou localhost:8002 como fallback
 // Para produção, defina a URL do seu backend aqui:
-window.API_URL = window.API_URL || 'http://localhost:8002/api';
+window.API_URL = window.API_URL || 'https://sacola-ideias.onrender.com/api';
 
 // Exemplo para produção (descomente e ajuste):
 // window.API_URL = 'https://seu-backend.onrender.com/api';

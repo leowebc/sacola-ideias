@@ -3,13 +3,75 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { showError } from '../utils/alerts'
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8002/api'
+const API_URL = (typeof window !== 'undefined' && window.API_URL)
+  ? window.API_URL
+  : (import.meta.env.VITE_API_URL || 'http://localhost:8002/api')
 
 function AuthCallback() {
   const [searchParams] = useSearchParams()
   const navigate = useNavigate()
   const { t } = useTranslation()
   const [status, setStatus] = useState('processando')
+
+  const handlePosAuthRedirect = async (token) => {
+    const meResponse = await fetch(`${API_URL}/auth/me`, {
+      headers: {
+        'Authorization': `Bearer ${token}`
+      }
+    })
+
+    const meData = await meResponse.json()
+    if (!meResponse.ok) {
+      throw new Error(meData.detail || 'Falha ao obter dados do usuario')
+    }
+
+    localStorage.setItem('auth_token', token)
+    localStorage.setItem('user', JSON.stringify({
+      id: meData.id,
+      email: meData.email,
+      nome: meData.nome,
+      foto_url: meData.foto_url,
+      role: meData.role,
+      plano: meData.plano,
+      status: meData.status,
+      limite_buscas: meData.limite_buscas,
+      limite_embeddings: meData.limite_embeddings,
+      trial_ativo: meData.trial_ativo,
+      trial_expira_em: meData.trial_expira_em
+    }))
+
+    const plano = (meData.plano || '').toLowerCase()
+    const statusAss = (meData.status || '').toLowerCase()
+    const trialAtivo = Boolean(meData.trial_ativo)
+    const assinaturaAtiva = plano === 'pro' && (statusAss === 'ativa' || statusAss === 'active' || statusAss === 'trialing')
+
+    if (assinaturaAtiva || trialAtivo) {
+      setStatus('sucesso')
+      setTimeout(() => {
+        navigate('/app')
+      }, 1000)
+      return
+    }
+
+    const checkoutResponse = await fetch(`${API_URL}/stripe/checkout-session`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      }
+    })
+
+    const checkoutData = await checkoutResponse.json()
+    if (!checkoutResponse.ok) {
+      throw new Error(checkoutData.detail || 'Erro ao iniciar checkout')
+    }
+
+    if (!checkoutData.url) {
+      throw new Error('Checkout retornou URL invalida')
+    }
+
+    window.location.href = checkoutData.url
+  }
 
   useEffect(() => {
     const processarCallback = async () => {
@@ -27,39 +89,11 @@ function AuthCallback() {
       // Se o token já veio na URL (do backend), usar diretamente
       if (token) {
         try {
-          // Buscar dados do usuário usando o token
-          const response = await fetch(`${API_URL}/auth/me`, {
-            headers: {
-              'Authorization': `Bearer ${token}`
-            }
-          })
-
-          if (!response.ok) {
-            throw new Error('Falha ao obter dados do usuário')
-          }
-
-          const userData = await response.json()
-
-          // Salvar token e dados do usuário
-          localStorage.setItem('auth_token', token)
-          localStorage.setItem('user', JSON.stringify({
-            id: userData.id,
-            email: userData.email,
-            nome: userData.nome,
-            foto_url: userData.foto_url,
-            role: userData.role
-          }))
-
-          setStatus('sucesso')
-
-          // Redirecionar para tela de cadastro de ideias após 1 segundo
-          setTimeout(() => {
-            navigate('/app')
-          }, 1000)
+          await handlePosAuthRedirect(token)
         } catch (error) {
           console.error('Erro ao processar token:', error)
           setStatus('erro')
-          showError('Erro no login', 'Não foi possível completar o login')
+          showError('Erro no login', 'Nao foi possivel completar o login')
           setTimeout(() => navigate('/'), 2000)
         }
         return
@@ -95,21 +129,7 @@ function AuthCallback() {
 
         const data = await response.json()
 
-        // Salvar token no localStorage
-        localStorage.setItem('auth_token', data.token)
-        localStorage.setItem('user', JSON.stringify({
-          id: data.id,
-          email: data.email,
-          nome: data.nome,
-          foto_url: data.foto_url
-        }))
-
-        setStatus('sucesso')
-
-        // Redirecionar para tela de cadastro de ideias após 1 segundo
-        setTimeout(() => {
-          navigate('/app')
-        }, 1000)
+        await handlePosAuthRedirect(data.token)
 
       } catch (error) {
         console.error('Erro ao processar callback:', error)
@@ -151,4 +171,3 @@ function AuthCallback() {
 }
 
 export default AuthCallback
-

@@ -4,7 +4,9 @@ import { useTranslation } from 'react-i18next'
 import LoginGoogle from '../components/LoginGoogle'
 import { showError, showSuccessToast } from '../utils/alerts'
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8002/api'
+const API_URL = (typeof window !== 'undefined' && window.API_URL)
+  ? window.API_URL
+  : (import.meta.env.VITE_API_URL || 'http://localhost:8002/api')
 
 function Login() {
   const { t } = useTranslation()
@@ -16,6 +18,67 @@ function Login() {
   const [email, setEmail] = useState('')
   const [senha, setSenha] = useState('')
   const [nome, setNome] = useState('')
+
+  const handlePosAuthRedirect = async (token) => {
+    try {
+      const meResponse = await fetch(`${API_URL}/auth/me`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      })
+
+      const meData = await meResponse.json()
+      if (!meResponse.ok) {
+        throw new Error(meData.detail || 'Falha ao obter dados do usuario')
+      }
+
+      localStorage.setItem('user', JSON.stringify({
+        id: meData.id,
+        email: meData.email,
+        nome: meData.nome,
+        foto_url: meData.foto_url,
+        role: meData.role,
+        plano: meData.plano,
+        status: meData.status,
+        limite_buscas: meData.limite_buscas,
+        limite_embeddings: meData.limite_embeddings,
+        trial_ativo: meData.trial_ativo,
+        trial_expira_em: meData.trial_expira_em
+      }))
+
+      const plano = (meData.plano || '').toLowerCase()
+      const status = (meData.status || '').toLowerCase()
+      const trialAtivo = Boolean(meData.trial_ativo)
+      const assinaturaAtiva = plano === 'pro' && (status === 'ativa' || status === 'active' || status === 'trialing')
+
+      if (assinaturaAtiva || trialAtivo) {
+        navigate('/app')
+        return
+      }
+
+      const checkoutResponse = await fetch(`${API_URL}/stripe/checkout-session`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
+      })
+
+      const checkoutData = await checkoutResponse.json()
+      if (!checkoutResponse.ok) {
+        throw new Error(checkoutData.detail || 'Erro ao iniciar checkout')
+      }
+
+      if (!checkoutData.url) {
+        throw new Error('Checkout retornou URL invalida')
+      }
+
+      window.location.href = checkoutData.url
+    } catch (err) {
+      console.error('Erro no redirecionamento pos-auth:', err)
+      showError('Erro ao iniciar assinatura', err.message || 'Nao foi possivel iniciar o checkout')
+    }
+  }
 
   const handleSubmit = async (e) => {
     e.preventDefault()
@@ -54,9 +117,8 @@ function Login() {
       showSuccessToast(isLogin ? 'Login realizado com sucesso!' : 'Conta criada com sucesso!')
       
       // Redirecionar para tela de cadastro de ideias (sempre para usuários normais)
-      setTimeout(() => {
-        navigate('/app')
-      }, 500)
+      // Redirecionar conforme status de assinatura
+      await handlePosAuthRedirect(data.token)
 
     } catch (error) {
       console.error('Erro:', error)
@@ -195,4 +257,3 @@ function Login() {
 }
 
 export default Login
-

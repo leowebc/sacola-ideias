@@ -58,3 +58,11 @@ Thumbs.db
 *.bak
 *.tmp
 *.md
+
+#########################################
+#   MOBILE (REACT NATIVE / EXPO)
+#########################################
+
+mobile/node_modules/
+mobile/.expo/
+mobile/.vscode/
