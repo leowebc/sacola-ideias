@@ -3,9 +3,10 @@ import { useTranslation } from 'react-i18next'
 import SacolaAnimacao from '../components/SacolaAnimacao'
 import AutocompleteInput from '../components/AutocompleteInput'
 import LembrancaModal from '../components/LembrancaModal'
+import IdeiaModal from '../components/IdeiaModal'
 import { salvarIdeiaComEmbedding } from '../services/buscaService'
 import { getApiKey } from '../utils/apiKey'
-import { showError } from '../utils/alerts'
+import { showDeleteConfirm, showError, showErrorToast, showSuccessToast } from '../utils/alerts'
 
 function Cadastro() {
   const { t } = useTranslation()
@@ -19,6 +20,10 @@ function Cadastro() {
   const [editandoId, setEditandoId] = useState(null)
   const [imagemErro, setImagemErro] = useState(false)
   const [mostrarLembrancaModal, setMostrarLembrancaModal] = useState(false)
+  const [ultimasIdeias, setUltimasIdeias] = useState([])
+  const [carregandoUltimas, setCarregandoUltimas] = useState(true)
+  const [ideiaSelecionada, setIdeiaSelecionada] = useState(null)
+  const [mostrarModal, setMostrarModal] = useState(false)
 
   // Debug
   useEffect(() => {
@@ -28,46 +33,131 @@ function Cadastro() {
   // Nota: A edição agora é feita diretamente no modal, então não precisamos mais
   // carregar ideias para editar aqui. Mas mantemos o código caso seja necessário.
 
-  // Carregar sugestões de títulos e tags das ideias existentes
-  useEffect(() => {
-    const carregarSugestoes = async () => {
-      try {
-        const { buscarTodasIdeias } = await import('../services/dbService')
-        const ideias = await buscarTodasIdeias()
-        
-        // Extrair títulos únicos
-        const titulos = [...new Set(ideias.map(i => i.titulo).filter(Boolean))]
-        setTitulosSugeridos(titulos)
-        
-        // Extrair tags únicas
-        const tags = [...new Set(ideias.map(i => i.tag).filter(Boolean))]
-        setTagsSugeridas(tags)
-      } catch (error) {
-        console.error('Erro ao carregar sugestões do banco:', error)
-        // Fallback para localStorage ou arrays vazios
-        try {
-          const ideias = JSON.parse(localStorage.getItem('sacola_ideias') || '[]')
-          const titulos = [...new Set(ideias.map(i => i.titulo).filter(Boolean))]
-          const tags = [...new Set(ideias.map(i => i.tag).filter(Boolean))]
-          setTitulosSugeridos(titulos)
-          setTagsSugeridas(tags)
-        } catch (localError) {
-          console.error('Erro ao carregar do localStorage:', localError)
-          setTitulosSugeridos([])
-          setTagsSugeridas([])
-        }
-      }
+  const obterTimestampIdeia = (ideia) => {
+    const dataRaw = ideia?.data || ideia?.created_at || ideia?.createdAt
+    const timestamp = dataRaw ? new Date(dataRaw).getTime() : NaN
+    return Number.isNaN(timestamp) ? 0 : timestamp
+  }
+
+  const prepararUltimasIdeias = (ideias) => {
+    if (!Array.isArray(ideias)) {
+      return []
     }
 
-    carregarSugestoes()
-    
-    // Recarregar quando uma ideia for salva
-    if (mostrarSucesso) {
-      setTimeout(() => {
-        carregarSugestoes()
-      }, 300)
+    return [...ideias]
+      .filter(Boolean)
+      .sort((a, b) => obterTimestampIdeia(b) - obterTimestampIdeia(a))
+      .slice(0, 6)
+  }
+
+  const carregarSugestoes = async () => {
+    setCarregandoUltimas(true)
+    try {
+      const { buscarTodasIdeias } = await import('../services/dbService')
+      const ideias = await buscarTodasIdeias()
+      
+      // Extrair títulos únicos
+      const titulos = [...new Set(ideias.map(i => i.titulo).filter(Boolean))]
+      setTitulosSugeridos(titulos)
+      
+      // Extrair tags únicas
+      const tags = [...new Set(ideias.map(i => i.tag).filter(Boolean))]
+      setTagsSugeridas(tags)
+
+      setUltimasIdeias(prepararUltimasIdeias(ideias))
+    } catch (error) {
+      console.error('Erro ao carregar sugestões do banco:', error)
+      // Fallback para localStorage ou arrays vazios
+      try {
+        const ideias = JSON.parse(localStorage.getItem('sacola_ideias') || '[]')
+        const titulos = [...new Set(ideias.map(i => i.titulo).filter(Boolean))]
+        const tags = [...new Set(ideias.map(i => i.tag).filter(Boolean))]
+        setTitulosSugeridos(titulos)
+        setTagsSugeridas(tags)
+        setUltimasIdeias(prepararUltimasIdeias(ideias))
+      } catch (localError) {
+        console.error('Erro ao carregar do localStorage:', localError)
+        setTitulosSugeridos([])
+        setTagsSugeridas([])
+        setUltimasIdeias([])
+      }
+    } finally {
+      setCarregandoUltimas(false)
     }
+  }
+
+  // Carregar sugestões de títulos e tags das ideias existentes
+  useEffect(() => {
+    carregarSugestoes()
+  }, [])
+
+  // Recarregar quando uma ideia for salva
+  useEffect(() => {
+    if (!mostrarSucesso) {
+      return
+    }
+
+    const timer = setTimeout(() => {
+      carregarSugestoes()
+    }, 300)
+
+    return () => clearTimeout(timer)
   }, [mostrarSucesso])
+
+  const formatarData = (dataISO) => {
+    if (!dataISO) return ''
+    const data = new Date(dataISO)
+    return data.toLocaleString('pt-BR', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    })
+  }
+
+  const handleCardClick = (ideia) => {
+    setIdeiaSelecionada(ideia)
+    setMostrarModal(true)
+  }
+
+  const handleCloseModal = () => {
+    setMostrarModal(false)
+    setIdeiaSelecionada(null)
+  }
+
+  const handleEdit = (ideiaAtualizada) => {
+    setIdeiaSelecionada(ideiaAtualizada)
+    setUltimasIdeias(prev => prev.map(i => (i.id === ideiaAtualizada.id ? ideiaAtualizada : i)))
+    carregarSugestoes()
+  }
+
+  const handleExcluir = async (ideia, e) => {
+    if (e) {
+      e.stopPropagation()
+    }
+
+    const result = await showDeleteConfirm(ideia.titulo || 'pensamento')
+    if (!result.isConfirmed) {
+      return
+    }
+
+    try {
+      const { deletarIdeia } = await import('../services/dbService')
+      await deletarIdeia(ideia.id)
+
+      setUltimasIdeias(prev => prev.filter(i => i.id !== ideia.id))
+      if (ideiaSelecionada && ideiaSelecionada.id === ideia.id) {
+        handleCloseModal()
+      }
+
+      showSuccessToast('Pensamento excluído com sucesso!')
+      carregarSugestoes()
+    } catch (error) {
+      console.error('Erro ao excluir ideia:', error)
+      showErrorToast(`Erro ao excluir: ${error.message || 'tente novamente.'}`)
+    }
+  }
 
   const handleSubmit = async (e) => {
     e.preventDefault()
@@ -397,11 +487,11 @@ function Cadastro() {
             </form>
           </div>
 
-          {/* Animação da Sacola */}
-          <div className="modern-card rounded-2xl p-8 flex items-center justify-center min-h-[500px] animate-fade-in relative">
-            {/* Imagem "esqueceu?" no canto direito */}
+          {/* Animação da Sacola + Últimos pensamentos */}
+          <div className="relative animate-fade-in">
+            {/* Imagem "esqueceu?" fora do quadro */}
             <div 
-              className="absolute top-4 right-4 group z-20"
+              className="absolute top-0 right-0 -translate-y-1/2 translate-x-0 sm:translate-x-1/2 group z-20"
               title={t('lembranca.tooltip')}
             >
               <button
@@ -431,12 +521,99 @@ function Cadastro() {
                 <div className="absolute -top-1 right-4 w-2 h-2 bg-gray-900 transform rotate-45"></div>
               </div>
             </div>
-            <SacolaAnimacao 
-              titulo={titulo}
-              tag={tag}
-              ideia={ideia}
-              mostrarSucesso={mostrarSucesso}
-            />
+
+            <div className="modern-card rounded-2xl p-8 min-h-[500px] flex flex-col gap-6">
+              <div className="w-full">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-lg font-semibold text-gray-800">
+                    Últimos pensamentos
+                  </h2>
+                  <span className="text-xs text-gray-400">
+                    {ultimasIdeias.length}/6
+                  </span>
+                </div>
+
+                {carregandoUltimas ? (
+                  <div className="flex items-center text-sm text-gray-500">
+                    <span className="ai-loader-bars">
+                      <span className="ai-loader-bar"></span>
+                      <span className="ai-loader-bar"></span>
+                      <span className="ai-loader-bar"></span>
+                      <span className="ai-loader-bar"></span>
+                    </span>
+                    <span>Carregando pensamentos...</span>
+                  </div>
+                ) : ultimasIdeias.length === 0 ? (
+                  <p className="text-sm text-gray-500">
+                    Ainda não há pensamentos salvos.
+                  </p>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {ultimasIdeias.map((item, index) => (
+                      <div
+                        key={item.id || `${item.titulo || 'ideia'}-${item.data || index}`}
+                        className="modern-card rounded-xl p-3 cursor-pointer transform hover:scale-[1.01] transition-all duration-200"
+                        onClick={() => handleCardClick(item)}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <h3 className="text-sm font-semibold text-gray-900 truncate">
+                            {item.titulo || 'Sem título'}
+                          </h3>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={(e) => handleExcluir(item, e)}
+                              className="p-1.5 rounded-lg bg-red-50 text-red-600 hover:bg-red-100 border border-red-200 transition-colors text-xs font-medium flex items-center justify-center"
+                              title="Excluir"
+                            >
+                              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                              </svg>
+                            </button>
+                            {item.tag && (
+                              <span className="shrink-0 inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-gradient-to-r from-indigo-100 to-purple-100 text-indigo-700">
+                                {item.tag}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        <p className="mt-2 text-[11px] text-gray-600 line-clamp-2">
+                          {item.ideia || 'Sem descrição.'}
+                        </p>
+
+                        <div className="flex items-center justify-between mt-3 pt-3 border-t border-gray-100">
+                          <p className="text-[10px] text-gray-400">
+                            {formatarData(item.data)}
+                          </p>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              handleCardClick(item)
+                            }}
+                            className="text-[11px] text-indigo-600 font-medium hover:text-indigo-700 flex items-center space-x-1"
+                          >
+                            <span>Clique para ver mais</span>
+                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex-1 w-full flex items-start justify-center">
+                <SacolaAnimacao 
+                  titulo={titulo}
+                  tag={tag}
+                  ideia={ideia}
+                  mostrarSucesso={mostrarSucesso}
+                />
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -462,6 +639,15 @@ function Cadastro() {
             setMostrarLembrancaModal(false)
           }
         }}
+      />
+
+      <IdeiaModal
+        ideia={ideiaSelecionada}
+        isOpen={mostrarModal}
+        onClose={handleCloseModal}
+        onEdit={handleEdit}
+        titulosSugeridos={titulosSugeridos}
+        tagsSugeridas={tagsSugeridas}
       />
     </div>
   )
