@@ -2,7 +2,9 @@
  * Serviço para registrar logs de acesso com localização
  */
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8002/api'
+const API_URL = (typeof window !== 'undefined' && window.API_URL)
+  ? window.API_URL
+  : (import.meta.env.VITE_API_URL || 'http://localhost:8002/api')
 
 /**
  * Obter localização do usuário via API de geolocalização

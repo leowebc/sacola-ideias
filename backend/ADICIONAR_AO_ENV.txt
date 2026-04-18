@@ -20,6 +20,25 @@ GOOGLE_REDIRECT_URI=http://localhost:8002/api/auth/google/callback
 CONTATO_EMAIL=contato@sacoladeideias.com
 
 # =====================================================
+# BANCO DE DADOS - OBRIGATÓRIO PARA LOGIN/CADASTRO
+# =====================================================
+# Opção recomendada: use uma única DATABASE_URL/SUPABASE_DB_URL do Postgres
+# Exemplo Supabase:
+# DATABASE_URL=postgresql://postgres:SUA_SENHA@db.SEUPROJETO.supabase.co:5432/postgres?sslmode=require
+#
+# Alternativa: use variáveis separadas
+# DB_HOST=db.SEUPROJETO.supabase.co
+# DB_NAME=postgres
+# DB_USER=postgres
+# DB_PASSWORD=SUA_SENHA_DO_BANCO
+# DB_PORT=5432
+# DB_SSLMODE=require
+#
+# Observação:
+# Se essas variáveis não existirem, o backend cai no PostgreSQL local padrão
+# e pode retornar erros como: relation "usuarios" does not exist
+
+# =====================================================
 # NOTA:
 # =====================================================
 # Se você já tem FRONTEND_URL e GOOGLE_REDIRECT_URI no seu .env,

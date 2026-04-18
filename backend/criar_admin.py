@@ -10,17 +10,12 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from auth import hash_senha
+from db_config import build_db_config
 
 load_dotenv()
 
 # Configuração do banco
-DB_CONFIG = {
-    "host": os.getenv("DB_HOST", "localhost"),
-    "database": os.getenv("DB_NAME", "sacola_ideias"),
-    "user": os.getenv("DB_USER", "postgres"),
-    "password": os.getenv("DB_PASSWORD", "senha123"),
-    "port": os.getenv("DB_PORT", "5432"),
-}
+DB_CONFIG, _DB_CONFIG_SOURCE = build_db_config(default_database="sacola_ideias")
 
 def criar_admin():
     """Criar usuário admin"""

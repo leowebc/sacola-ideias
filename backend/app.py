@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
+import re
 from dotenv import load_dotenv
 import stripe
 import traceback
@@ -28,6 +29,7 @@ from auth import (
     verificar_senha,
     GOOGLE_CLIENT_ID
 )
+from db_config import build_db_config, sanitize_db_config
 
 load_dotenv()
 
@@ -35,10 +37,21 @@ load_dotenv()
 # CONFIGURAÇÕES DE AMBIENTE (URLs e Portas)
 # =====================================================
 # Todas as URLs e portas devem vir do .env para funcionar em local e produção
-BACKEND_PORT = int(os.getenv("BACKEND_PORT", "8002"))
+BACKEND_PORT = int(os.getenv("PORT") or os.getenv("BACKEND_PORT", "8002"))
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", f"http://localhost:{BACKEND_PORT}/api/auth/google/callback")
 CONTATO_EMAIL = os.getenv("CONTATO_EMAIL", "contato@sacoladeideias.com")
+
+
+def _parse_cors_origins() -> List[str]:
+    raw_origins = os.getenv("CORS_ORIGINS", "")
+    origins = [origin.strip().rstrip("/") for origin in raw_origins.split(",") if origin.strip()]
+    if not origins and FRONTEND_URL:
+        origins = [FRONTEND_URL.rstrip("/")]
+    return origins or ["http://localhost:5173"]
+
+
+CORS_ORIGINS = _parse_cors_origins()
 
 # Configurar embeddings (usa API Key do .env)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -115,11 +128,13 @@ async def startup_event():
     # Testar conexão com o banco
     print("=" * 80)
     print("🔌 TESTANDO CONEXÃO COM O BANCO DE DADOS:")
-    print(f"   Host: {DB_CONFIG['host']}")
-    print(f"   Port: {DB_CONFIG['port']}")
-    print(f"   Database: {DB_CONFIG['database']}")
-    print(f"   User: {DB_CONFIG['user']}")
-    print(f"   Password: {'***' if DB_CONFIG['password'] else 'NÃO CONFIGURADO'}")
+    safe_db_config = sanitize_db_config(DB_CONFIG)
+    print(f"   Source: {DB_CONFIG_SOURCE}")
+    print(f"   Host: {safe_db_config['host']}")
+    print(f"   Port: {safe_db_config['port']}")
+    print(f"   Database: {safe_db_config['database']}")
+    print(f"   User: {safe_db_config['user']}")
+    print(f"   Password: {safe_db_config['password']}")
     print("=" * 80)
     
     try:
@@ -127,41 +142,58 @@ async def startup_event():
         with conn.cursor() as cur:
             cur.execute("SELECT version();")
             version = cur.fetchone()[0]
+            cur.execute(
+                """
+                SELECT
+                    current_database(),
+                    current_schema(),
+                    to_regclass('public.usuarios'),
+                    to_regclass('public.assinaturas')
+                """
+            )
+            current_database, current_schema, usuarios_table, assinaturas_table = cur.fetchone()
             print(f"✅ Conexão com o banco estabelecida com sucesso!")
             print(f"   PostgreSQL version: {version[:50]}...")
+            print(f"   current_database(): {current_database}")
+            print(f"   current_schema(): {current_schema}")
+            print(f"   public.usuarios: {usuarios_table or 'AUSENTE'}")
+            print(f"   public.assinaturas: {assinaturas_table or 'AUSENTE'}")
+            if not usuarios_table or not assinaturas_table:
+                print("⚠️  O backend conectou, mas o schema esperado não está nesse banco/schema.")
         conn.close()
     except Exception as e:
         print(f"❌ ERRO ao conectar com o banco: {e}")
         print(f"   Verifique as credenciais no arquivo .env")
     print("=" * 80)
+    print(f"🌐 CORS_ORIGINS: {CORS_ORIGINS}")
+    print("=" * 80)
 
 # Configurar CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Em produção, especifique os domínios
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Configuração do banco de dados (Supabase ou PostgreSQL local)
-# Em produção: use as variáveis de ambiente do servidor
-# Em local: configure no arquivo .env (veja ENV_SETUP.md)
-# 
-# NOTA: Você pode usar o mesmo Supabase em local e produção, ou criar um banco
-# separado para desenvolvimento local. Basta mudar as variáveis DB_* no .env local.
-DB_CONFIG = {
-    "host": os.getenv("DB_HOST", "localhost"),
-    "database": os.getenv("DB_NAME", "postgres"),  # Supabase usa 'postgres' como database padrão
-    "user": os.getenv("DB_USER", "postgres"),
-    # Prioridade: SUPABASE_DB_PASSWORD > DB_PASSWORD > fallback
-    "password": os.getenv("SUPABASE_DB_PASSWORD") or os.getenv("DB_PASSWORD", "senha123"),
-    "port": int(os.getenv("DB_PORT", "5432")),  # Converter para int
-}
+# Configuração do banco de dados (Supabase Postgres ou PostgreSQL direto)
+# Aceita DATABASE_URL/SUPABASE_DB_URL para evitar divergência entre ambientes.
+DB_CONFIG, DB_CONFIG_SOURCE = build_db_config(default_database="postgres")
 
-# Adicionar sslmode se especificado (importante para Supabase)
-if os.getenv("DB_SSLMODE"):
-    DB_CONFIG["sslmode"] = os.getenv("DB_SSLMODE")
+
+def _extract_missing_relation_name(error: Exception) -> Optional[str]:
+    match = re.search(r'relation "([^"]+)" does not exist', str(error), re.IGNORECASE)
+    return match.group(1) if match else None
+
+
+def _missing_relation_detail(table_name: Optional[str] = None) -> str:
+    alvo = f'Tabela "{table_name}"' if table_name else "Uma tabela obrigatória"
+    return (
+        f"{alvo} não existe no banco configurado. "
+        "Verifique DATABASE_URL/SUPABASE_DB_URL ou DB_HOST/DB_NAME/DB_USER/DB_PASSWORD "
+        "no backend; a API provavelmente está conectada em outro banco ou schema."
+    )
 
 def get_db_connection():
     """Criar conexão com o banco de dados"""
@@ -169,13 +201,15 @@ def get_db_connection():
         conn = psycopg2.connect(**DB_CONFIG)
         return conn
     except psycopg2.OperationalError as e:
+        safe_db_config = sanitize_db_config(DB_CONFIG)
         print(f"❌ Erro de conexão com o banco: {e}")
-        print(f"   Host: {DB_CONFIG.get('host', 'N/A')}")
-        print(f"   Port: {DB_CONFIG.get('port', 'N/A')}")
-        print(f"   Database: {DB_CONFIG.get('database', 'N/A')}")
-        print(f"   User: {DB_CONFIG.get('user', 'N/A')}")
+        print(f"   Source: {DB_CONFIG_SOURCE}")
+        print(f"   Host: {safe_db_config.get('host', 'N/A')}")
+        print(f"   Port: {safe_db_config.get('port', 'N/A')}")
+        print(f"   Database: {safe_db_config.get('database', 'N/A')}")
+        print(f"   User: {safe_db_config.get('user', 'N/A')}")
         print(f"   Password configurada: {'Sim' if DB_CONFIG.get('password') else 'NÃO'}")
-        print(f"   SSL Mode: {DB_CONFIG.get('sslmode', 'não especificado')}")
+        print(f"   SSL Mode: {safe_db_config.get('sslmode', 'não especificado')}")
         raise HTTPException(
             status_code=503, 
             detail=f"Erro ao conectar ao banco de dados. Verifique as credenciais no .env. Detalhes: {str(e)}"
@@ -1311,6 +1345,12 @@ def registrar_usuario(register_data: RegisterRequest):
             )
     except HTTPException:
         raise
+    except psycopg2.errors.UndefinedTable as e:
+        if conn:
+            conn.rollback()
+        table_name = _extract_missing_relation_name(e)
+        print(f"Erro ao registrar usuário: tabela ausente ({table_name or 'desconhecida'})")
+        raise HTTPException(status_code=503, detail=_missing_relation_detail(table_name))
     except Exception as e:
         if conn:
             conn.rollback()
@@ -1425,6 +1465,12 @@ def login_usuario(login_data: LoginRequest):
                 raise
     except HTTPException:
         raise
+    except psycopg2.errors.UndefinedTable as e:
+        if conn:
+            conn.rollback()
+        table_name = _extract_missing_relation_name(e)
+        print(f"❌ Tabela ausente durante login: {table_name or 'desconhecida'}")
+        raise HTTPException(status_code=503, detail=_missing_relation_detail(table_name))
     except Exception as e:
         print(f"❌ Erro no login: {e}")
         import traceback
@@ -1740,6 +1786,9 @@ async def obter_usuario_logado(user: dict = Depends(obter_usuario_atual)):
                 response["trial_ativo"] = False
 
             return response
+    except psycopg2.errors.UndefinedTable as e:
+        table_name = _extract_missing_relation_name(e)
+        raise HTTPException(status_code=503, detail=_missing_relation_detail(table_name))
     finally:
         conn.close()
 
@@ -2064,6 +2113,6 @@ Retorne APENAS as sugestões, uma por linha, sem numeração ou marcadores."""
 
 if __name__ == "__main__":
     import uvicorn
-    PORT = 8002  # Mudar para 8002 se 8001 estiver ocupada
+    PORT = int(os.getenv("PORT") or os.getenv("BACKEND_PORT", "8002"))
     print(f"🚀 Servidor rodando na porta {PORT}")
     uvicorn.run(app, host="0.0.0.0", port=PORT)

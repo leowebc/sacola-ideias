@@ -1,0 +1,73 @@
+services:
+  - type: web
+    name: sacola-ideias-api
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.13
+      - key: FRONTEND_URL
+        sync: false
+      - key: GOOGLE_REDIRECT_URI
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: CONTATO_EMAIL
+        sync: false
+      - key: DB_HOST
+        sync: false
+      - key: DB_NAME
+        value: postgres
+      - key: DB_USER
+        sync: false
+      - key: DB_PASSWORD
+        sync: false
+      - key: DB_PORT
+        value: "5432"
+      - key: DB_SSLMODE
+        value: require
+      - key: JWT_SECRET
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_PRICE_ID
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_SUCCESS_URL
+        sync: false
+      - key: STRIPE_CANCEL_URL
+        sync: false
+      - key: PRO_LIMITE_BUSCAS
+        value: "1000"
+      - key: PRO_LIMITE_EMBEDDINGS
+        value: "1000"
+      - key: FREE_LIMITE_BUSCAS
+        value: "10"
+      - key: FREE_LIMITE_EMBEDDINGS
+        value: "10"
+      - key: TRIAL_DIAS
+        value: "3"
+
+  - type: static_site
+    name: sacola-ideias-web
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    publishDir: dist
+    envVars:
+      - key: VITE_API_URL
+        sync: false
+      - key: VITE_CONTATO_EMAIL
+        sync: false
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html

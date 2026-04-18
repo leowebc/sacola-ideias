@@ -5,7 +5,7 @@ import AutocompleteInput from '../components/AutocompleteInput'
 import LembrancaModal from '../components/LembrancaModal'
 import IdeiaModal from '../components/IdeiaModal'
 import { salvarIdeiaComEmbedding } from '../services/buscaService'
-import { getApiKey } from '../utils/apiKey'
+import { atualizarIdeia as atualizarIdeiaDB } from '../services/dbService'
 import { showDeleteConfirm, showError, showErrorToast, showSuccessToast } from '../utils/alerts'
 
 function Cadastro() {
@@ -179,37 +179,14 @@ function Cadastro() {
           ideia: ideia.trim(),
           data: new Date().toISOString()
         }
-        
-        // Atualizar no localStorage (remover embedding antigo para regenerar)
-        const ideiasExistentes = JSON.parse(localStorage.getItem('sacola_ideias') || '[]')
-        const index = ideiasExistentes.findIndex(i => i.id === editandoId)
-        if (index !== -1) {
-          // Remove embedding para forçar regeneração
-          delete ideiasExistentes[index].embedding
-          ideiasExistentes[index] = ideiaAtualizada
-          localStorage.setItem('sacola_ideias', JSON.stringify(ideiasExistentes))
-        }
-        
-        // Obter API key e regenerar embedding
-        const apiKey = getApiKey()
-        if (apiKey) {
-          try {
-            const { gerarEmbedding } = await import('../services/buscaService')
-            const textoCompleto = `${ideiaAtualizada.titulo} ${ideiaAtualizada.tag || ''} ${ideiaAtualizada.ideia}`.trim()
-            const embedding = await gerarEmbedding(textoCompleto, apiKey)
-            
-            // Atualizar com novo embedding
-            const todasIdeias = JSON.parse(localStorage.getItem('sacola_ideias') || '[]')
-            const idx = todasIdeias.findIndex(i => i.id === editandoId)
-            if (idx !== -1) {
-              todasIdeias[idx].embedding = embedding
-              localStorage.setItem('sacola_ideias', JSON.stringify(todasIdeias))
-            }
-          } catch (error) {
-            console.error('Erro ao gerar embedding para edição:', error)
-          }
-        }
-        
+
+        // Backend atualiza a ideia e regenera o embedding quando a OpenAI estiver configurada.
+        await atualizarIdeiaDB(editandoId, {
+          titulo: ideiaAtualizada.titulo,
+          tag: ideiaAtualizada.tag,
+          ideia: ideiaAtualizada.ideia,
+        })
+
         // Resetar modo de edição
         setEditandoId(null)
       } else {

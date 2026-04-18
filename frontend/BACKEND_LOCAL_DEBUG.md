@@ -12,9 +12,9 @@ Em produção funciona corretamente, então o problema está na **configuração
 O backend local pode estar usando variáveis de ambiente diferentes do backend de produção.
 
 **Verifique no backend local:**
-- `SUPABASE_URL` está configurada?
-- `SUPABASE_KEY` está configurada?
-- As credenciais são as mesmas de produção?
+- `DATABASE_URL` ou `SUPABASE_DB_URL` está configurada?
+- Ou as variáveis `DB_HOST`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_PORT`, `DB_SSLMODE` estão configuradas?
+- As credenciais são as mesmas do banco onde estão as tabelas `usuarios`, `ideias` e `assinaturas`?
 
 ### 2. Banco de Dados Diferente
 O backend local pode estar usando um banco diferente (SQLite, PostgreSQL local, etc) em vez do Supabase.
@@ -84,18 +84,14 @@ Procure no código do backend por:
 No backend Python/FastAPI, verifique:
 
 ```python
-# Verificar se está usando Supabase
+# Verificar se está usando o Postgres correto
 import os
-from supabase import create_client
 
-SUPABASE_URL = os.getenv('SUPABASE_URL')
-SUPABASE_KEY = os.getenv('SUPABASE_KEY')
-
-print(f"Supabase URL: {SUPABASE_URL}")
-print(f"Supabase Key presente: {bool(SUPABASE_KEY)}")
-
-# Verificar conexão
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+print("DATABASE_URL presente:", bool(os.getenv("DATABASE_URL")))
+print("SUPABASE_DB_URL presente:", bool(os.getenv("SUPABASE_DB_URL")))
+print("DB_HOST:", os.getenv("DB_HOST"))
+print("DB_NAME:", os.getenv("DB_NAME"))
+print("DB_USER:", os.getenv("DB_USER"))
 ```
 
 ## Próximos Passos

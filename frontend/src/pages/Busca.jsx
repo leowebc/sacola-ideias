@@ -10,7 +10,6 @@ function Busca() {
   const [termoBusca, setTermoBusca] = useState('')
   const [resultados, setResultados] = useState([])
   const [buscando, setBuscando] = useState(false)
-  const [apiKey, setApiKey] = useState(null) // Backend gerencia API Key, não precisa no frontend
   const [ideiaSelecionada, setIdeiaSelecionada] = useState(null)
   const [mostrarModal, setMostrarModal] = useState(false)
   const [titulosSugeridos, setTitulosSugeridos] = useState([])
@@ -19,9 +18,6 @@ function Busca() {
   const buscarAbortControllerRef = useRef(null)
 
   useEffect(() => {
-    // Backend gerencia API Key, sempre assume que busca semântica está disponível
-    setApiKey(true) // Indica que busca semântica pode estar ativa (backend decide)
-
     // Apenas carrega sugestões (não traz mais a lista completa)
     carregarSugestoes().catch(err => console.error('Erro ao carregar sugestões:', err))
 
@@ -414,4 +410,3 @@ function Busca() {
 }
 
 export default Busca
-

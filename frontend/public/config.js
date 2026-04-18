@@ -9,7 +9,7 @@
   const isLocal = host === 'localhost' || host === '127.0.0.1';
   const defaultUrl = isLocal
     ? 'http://localhost:8002/api'
-    : 'https://sacola-ideias.onrender.com/api';
+    : 'https://sacola-ideias-api.onrender.com/api';
   window.API_URL = window.API_URL || defaultUrl;
 })();
 
