@@ -1,18 +1,30 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import SacolaAnimacao from '../components/SacolaAnimacao'
 import AutocompleteInput from '../components/AutocompleteInput'
 import LembrancaModal from '../components/LembrancaModal'
+import IdeiaCardMenu from '../components/IdeiaCardMenu'
 import IdeiaModal from '../components/IdeiaModal'
+import { atualizarAgendaIdeia } from '../services/agendaService'
 import { salvarIdeiaComEmbedding } from '../services/buscaService'
+import { buscarHistoricoKanban } from '../services/kanbanService'
 import { atualizarIdeia as atualizarIdeiaDB } from '../services/dbService'
+import { useWorkspace } from '../context/WorkspaceContext'
 import { showDeleteConfirm, showError, showErrorToast, showSuccessToast } from '../utils/alerts'
 
 function Cadastro() {
   const { t } = useTranslation()
+  const {
+    selectedProjectId,
+    selectedProject,
+    selectedSpace,
+    projectOptions,
+    carregarWorkspace,
+  } = useWorkspace()
   const [titulo, setTitulo] = useState('')
   const [tag, setTag] = useState('')
   const [ideia, setIdeia] = useState('')
+  const [projetoId, setProjetoId] = useState('')
   const [mostrarSucesso, setMostrarSucesso] = useState(false)
   const [salvando, setSalvando] = useState(false)
   const [titulosSugeridos, setTitulosSugeridos] = useState([])
@@ -24,6 +36,10 @@ function Cadastro() {
   const [carregandoUltimas, setCarregandoUltimas] = useState(true)
   const [ideiaSelecionada, setIdeiaSelecionada] = useState(null)
   const [mostrarModal, setMostrarModal] = useState(false)
+  const [acaoModalInicial, setAcaoModalInicial] = useState(null)
+  const [agendandoIdeia, setAgendandoIdeia] = useState(false)
+  const [kanbanHistory, setKanbanHistory] = useState([])
+  const [loadingKanbanHistory, setLoadingKanbanHistory] = useState(false)
 
   // Debug
   useEffect(() => {
@@ -91,6 +107,10 @@ function Cadastro() {
     carregarSugestoes()
   }, [])
 
+  useEffect(() => {
+    setProjetoId(selectedProjectId ? String(selectedProjectId) : '')
+  }, [selectedProjectId])
+
   // Recarregar quando uma ideia for salva
   useEffect(() => {
     if (!mostrarSucesso) {
@@ -116,21 +136,67 @@ function Cadastro() {
     })
   }
 
-  const handleCardClick = (ideia) => {
+  const carregarHistoricoKanban = async (ideiaId) => {
+    setLoadingKanbanHistory(true)
+    try {
+      const historico = await buscarHistoricoKanban(ideiaId)
+      setKanbanHistory(historico)
+      return historico
+    } catch (error) {
+      console.error('Erro ao carregar historico do Kanban:', error)
+      setKanbanHistory([])
+      return []
+    } finally {
+      setLoadingKanbanHistory(false)
+    }
+  }
+
+  const handleCardClick = (ideia, acaoInicial = null) => {
     setIdeiaSelecionada(ideia)
     setMostrarModal(true)
+    setAcaoModalInicial(acaoInicial)
+    setKanbanHistory([])
+    carregarHistoricoKanban(ideia.id)
   }
 
   const handleCloseModal = () => {
     setMostrarModal(false)
     setIdeiaSelecionada(null)
+    setAcaoModalInicial(null)
+    setKanbanHistory([])
   }
 
   const handleEdit = (ideiaAtualizada) => {
     setIdeiaSelecionada(ideiaAtualizada)
     setUltimasIdeias(prev => prev.map(i => (i.id === ideiaAtualizada.id ? ideiaAtualizada : i)))
     carregarSugestoes()
+    carregarWorkspace()
   }
+
+  const handleScheduleIdea = async (ideia, payload) => {
+    setAgendandoIdeia(true)
+    try {
+      const ideiaAtualizada = await atualizarAgendaIdeia(ideia.id, payload)
+      setIdeiaSelecionada(ideiaAtualizada)
+      setUltimasIdeias((prev) => prev.map((item) => (item.id === ideiaAtualizada.id ? ideiaAtualizada : item)))
+      showSuccessToast(payload.agenda_data ? 'Previsao de entrega atualizada!' : 'Previsao removida da ideia.')
+      return ideiaAtualizada
+    } catch (error) {
+      console.error('Erro ao atualizar agenda da ideia:', error)
+      showErrorToast(error.message || 'Nao foi possivel atualizar a previsao da ideia.')
+      throw error
+    } finally {
+      setAgendandoIdeia(false)
+    }
+  }
+
+  const ultimasIdeiasFiltradas = useMemo(() => {
+    if (!projetoId) {
+      return ultimasIdeias
+    }
+
+    return ultimasIdeias.filter((item) => Number(item.projeto_id) === Number(projetoId))
+  }, [ultimasIdeias, projetoId])
 
   const handleExcluir = async (ideia, e) => {
     if (e) {
@@ -196,7 +262,8 @@ function Cadastro() {
           titulo: titulo.trim(),
           tag: tag.trim(),
           ideia: ideia.trim(),
-          data: new Date().toISOString()
+          data: new Date().toISOString(),
+          projeto_id: projetoId ? Number(projetoId) : null,
         }
         
         console.log('📝 [Cadastro] Salvando nova ideia:', ideiaAtualizada)
@@ -204,6 +271,7 @@ function Cadastro() {
         // Backend gera embedding automaticamente
         const resultado = await salvarIdeiaComEmbedding(ideiaAtualizada, null)
         console.log('✅ [Cadastro] Ideia salva, resposta do backend:', resultado)
+        await carregarWorkspace()
         
         // Verificar se a resposta contém um ID válido do banco
         if (resultado && resultado.id) {
@@ -235,6 +303,7 @@ function Cadastro() {
         setTitulo('')
         setTag('')
         setIdeia('')
+        setProjetoId(selectedProjectId ? String(selectedProjectId) : '')
       }, 4000) // Tempo para animação completa
       
       // Esconder mensagem de sucesso após animação
@@ -348,6 +417,39 @@ function Cadastro() {
           {/* Formulário */}
           <div className="modern-card rounded-2xl p-8 animate-fade-in">
             <form onSubmit={handleSubmit} className="space-y-6">
+              <div className="rounded-2xl border border-indigo-100 bg-indigo-50/70 p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-indigo-500">
+                      Projeto
+                    </p>
+                    <h2 className="mt-1 text-sm font-semibold text-slate-900">
+                      {selectedProject
+                        ? `${selectedSpace?.nome || selectedProject.espaco_nome} / ${selectedProject.nome}`
+                        : 'Nenhum projeto ativo'}
+                    </h2>
+                    <p className="mt-1 text-xs text-slate-500">
+                      Escolha onde essa ideia deve entrar. O Kanban usara esse vinculo para organizar os cards por projeto.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-4">
+                  <select
+                    value={projetoId}
+                    onChange={(event) => setProjetoId(event.target.value)}
+                    className="w-full rounded-xl border border-indigo-100 bg-white px-3 py-2.5 text-sm text-slate-700 focus:border-indigo-300 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+                  >
+                    <option value="">Sem projeto</option>
+                    {projectOptions.map((option) => (
+                      <option key={option.id} value={option.id}>
+                        {option.espaco_nome} / {option.nome}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
               <div>
                 <label className="block text-sm font-semibold text-gray-700 mb-2">
                   <span className="flex items-center space-x-2">
@@ -503,10 +605,10 @@ function Cadastro() {
               <div className="w-full">
                 <div className="flex items-center justify-between mb-4">
                   <h2 className="text-lg font-semibold text-gray-800">
-                    Últimos pensamentos
+                    {projetoId ? 'Ideias do projeto atual' : 'Últimos pensamentos'}
                   </h2>
                   <span className="text-xs text-gray-400">
-                    {ultimasIdeias.length}/6
+                    {ultimasIdeiasFiltradas.length}/6
                   </span>
                 </div>
 
@@ -520,60 +622,60 @@ function Cadastro() {
                     </span>
                     <span>Carregando pensamentos...</span>
                   </div>
-                ) : ultimasIdeias.length === 0 ? (
+                ) : ultimasIdeiasFiltradas.length === 0 ? (
                   <p className="text-sm text-gray-500">
-                    Ainda não há pensamentos salvos.
+                    {projetoId
+                      ? 'Ainda não há ideias vinculadas a este projeto.'
+                      : 'Ainda não há pensamentos salvos.'}
                   </p>
                 ) : (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {ultimasIdeias.map((item, index) => (
-                      <div
-                        key={item.id || `${item.titulo || 'ideia'}-${item.data || index}`}
-                        className="modern-card rounded-xl p-3 cursor-pointer transform hover:scale-[1.01] transition-all duration-200"
-                        onClick={() => handleCardClick(item)}
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <h3 className="text-sm font-semibold text-gray-900 truncate">
-                            {item.titulo || 'Sem título'}
-                          </h3>
-                          <div className="flex items-center gap-2">
-                            <button
-                              onClick={(e) => handleExcluir(item, e)}
-                              className="p-1.5 rounded-lg bg-red-50 text-red-600 hover:bg-red-100 border border-red-200 transition-colors text-xs font-medium flex items-center justify-center"
-                              title="Excluir"
-                            >
-                              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                              </svg>
-                            </button>
-                            {item.tag && (
-                              <span className="shrink-0 inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-gradient-to-r from-indigo-100 to-purple-100 text-indigo-700">
-                                {item.tag}
-                              </span>
-                            )}
-                          </div>
-                        </div>
+	                    {ultimasIdeiasFiltradas.map((item, index) => (
+	                      <div
+	                        key={item.id || `${item.titulo || 'ideia'}-${item.data || index}`}
+	                        className="modern-card rounded-xl p-3 cursor-pointer transform hover:scale-[1.01] transition-all duration-200"
+	                        onClick={() => handleCardClick(item)}
+	                      >
+	                        <div className="flex items-start justify-between gap-2">
+	                          <h3 className="text-sm font-semibold text-gray-900 truncate">
+	                            {item.titulo || 'Sem título'}
+	                          </h3>
+	                          <div className="flex items-center gap-2">
+	                            {item.tag && (
+	                              <span className="shrink-0 inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-gradient-to-r from-indigo-100 to-purple-100 text-indigo-700">
+	                                {item.tag}
+	                              </span>
+	                            )}
+	                            <IdeiaCardMenu
+	                              ideia={item}
+	                              onOpenDetails={() => handleCardClick(item)}
+	                              onOpenProject={() => handleCardClick(item, 'project')}
+	                              onOpenSchedule={() => handleCardClick(item, 'agenda')}
+	                              onDelete={() => handleExcluir(item)}
+	                            />
+	                          </div>
+	                        </div>
 
-                        <p className="mt-2 text-[11px] text-gray-600 line-clamp-2">
-                          {item.ideia || 'Sem descrição.'}
-                        </p>
+	                        <p className="mt-2 text-[11px] text-gray-600 line-clamp-2">
+	                          {item.ideia || 'Sem descrição.'}
+	                        </p>
 
-                        <div className="flex items-center justify-between mt-3 pt-3 border-t border-gray-100">
-                          <p className="text-[10px] text-gray-400">
-                            {formatarData(item.data)}
-                          </p>
-                          <button
-                            type="button"
-                            onClick={(e) => {
+	                        <div className="flex items-center justify-between mt-3 pt-3 border-t border-gray-100">
+	                          <p className="text-[11px] text-gray-500">
+	                            {formatarData(item.data)}
+	                          </p>
+	                          <button
+	                            type="button"
+	                            onClick={(e) => {
                               e.stopPropagation()
                               handleCardClick(item)
                             }}
                             className="text-[11px] text-indigo-600 font-medium hover:text-indigo-700 flex items-center space-x-1"
                           >
-                            <span>Clique para ver mais</span>
-                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                            </svg>
+	                            <span>Abrir</span>
+	                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+	                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+	                            </svg>
                           </button>
                         </div>
                       </div>
@@ -623,8 +725,14 @@ function Cadastro() {
         isOpen={mostrarModal}
         onClose={handleCloseModal}
         onEdit={handleEdit}
+        onScheduleIdea={handleScheduleIdea}
+        agendandoIdeia={agendandoIdeia}
+        kanbanHistory={kanbanHistory}
+        loadingKanbanHistory={loadingKanbanHistory}
         titulosSugeridos={titulosSugeridos}
         tagsSugeridas={tagsSugeridas}
+        compactActions
+        initialAction={acaoModalInicial}
       />
     </div>
   )

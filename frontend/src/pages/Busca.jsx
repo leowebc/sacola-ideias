@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { buscarPorSimilaridade } from '../services/buscaService'
+import { atualizarAgendaIdeia } from '../services/agendaService'
+import { buscarHistoricoKanban } from '../services/kanbanService'
+import IdeiaCardMenu from '../components/IdeiaCardMenu'
 import IdeiaModal from '../components/IdeiaModal'
 // API Key é gerenciada pelo backend, não precisa no frontend
 import { showDeleteConfirm, showSuccessToast, showErrorToast } from '../utils/alerts'
@@ -12,8 +15,12 @@ function Busca() {
   const [buscando, setBuscando] = useState(false)
   const [ideiaSelecionada, setIdeiaSelecionada] = useState(null)
   const [mostrarModal, setMostrarModal] = useState(false)
+  const [acaoModalInicial, setAcaoModalInicial] = useState(null)
   const [titulosSugeridos, setTitulosSugeridos] = useState([])
   const [tagsSugeridas, setTagsSugeridas] = useState([])
+  const [agendandoIdeia, setAgendandoIdeia] = useState(false)
+  const [kanbanHistory, setKanbanHistory] = useState([])
+  const [loadingKanbanHistory, setLoadingKanbanHistory] = useState(false)
   const timeoutRef = useRef(null)
   const buscarAbortControllerRef = useRef(null)
 
@@ -107,9 +114,27 @@ function Busca() {
     })
   }
 
-  const handleCardClick = (ideia) => {
+  const carregarHistoricoKanban = async (ideiaId) => {
+    setLoadingKanbanHistory(true)
+    try {
+      const historico = await buscarHistoricoKanban(ideiaId)
+      setKanbanHistory(historico)
+      return historico
+    } catch (error) {
+      console.error('Erro ao carregar historico do Kanban:', error)
+      setKanbanHistory([])
+      return []
+    } finally {
+      setLoadingKanbanHistory(false)
+    }
+  }
+
+  const handleCardClick = (ideia, acaoInicial = null) => {
     setIdeiaSelecionada(ideia)
     setMostrarModal(true)
+    setAcaoModalInicial(acaoInicial)
+    setKanbanHistory([])
+    carregarHistoricoKanban(ideia.id)
   }
 
   const handleEdit = (ideiaAtualizada) => {
@@ -143,7 +168,9 @@ function Busca() {
 
   const handleExcluir = async (ideia, e) => {
     // Parar propagação do evento para não abrir o modal
-    e.stopPropagation()
+    if (e) {
+      e.stopPropagation()
+    }
     
     const result = await showDeleteConfirm(ideia.titulo, {
       title: t('busca.excluirConfirmTitle'),
@@ -190,6 +217,33 @@ function Busca() {
   const handleCloseModal = () => {
     setMostrarModal(false)
     setIdeiaSelecionada(null)
+    setAcaoModalInicial(null)
+    setKanbanHistory([])
+  }
+
+  const handleScheduleIdea = async (ideia, payload) => {
+    setAgendandoIdeia(true)
+    try {
+      const ideiaAtualizada = await atualizarAgendaIdeia(ideia.id, payload)
+
+      setIdeiaSelecionada(ideiaAtualizada)
+      setResultados(prev => prev.map((r) => {
+        const ideiaAtual = r.ideia || r
+        if (ideiaAtual.id === ideiaAtualizada.id) {
+          return { ideia: ideiaAtualizada, similaridade: r.similaridade }
+        }
+        return r
+      }))
+
+      showSuccessToast(payload.agenda_data ? 'Agenda da ideia atualizada!' : 'Agenda removida da ideia.')
+      return ideiaAtualizada
+    } catch (error) {
+      console.error('Erro ao atualizar agenda da ideia:', error)
+      showErrorToast(error.message || 'Nao foi possivel atualizar a agenda da ideia.')
+      throw error
+    } finally {
+      setAgendandoIdeia(false)
+    }
   }
 
   return (
@@ -339,39 +393,37 @@ function Busca() {
                 const ideia = resultado.ideia || resultado
                 const similaridade = resultado.similaridade !== undefined ? resultado.similaridade : null
                 return (
-                <div 
-                  key={ideia.id} 
-                  className="modern-card rounded-xl p-6 cursor-pointer transform hover:scale-[1.02] transition-all duration-200"
-                  onClick={() => handleCardClick(ideia)}
-                >
-                  <div className="flex justify-between items-start mb-2">
-                    <h2 className="text-2xl font-bold text-gray-900">
-                      {ideia.titulo}
-                    </h2>
-                    <div className="flex gap-2 items-center">
-                      <button
-                        onClick={(e) => handleExcluir(ideia, e)}
-                        className="px-2.5 py-1.5 rounded-lg bg-red-50 text-red-600 hover:bg-red-100 border border-red-200 transition-colors text-sm font-medium flex items-center justify-center"
-                        title={t('busca.excluirIdeia')}
-                      >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                        </svg>
-                      </button>
-                      {similaridade !== null && similaridade !== undefined && (
-                        <div className="tooltip" data-tip={t('busca.similaridade', { percent: (similaridade * 100).toFixed(1) })}>
-                          <div className="badge badge-success badge-lg">
-                            {(similaridade * 100).toFixed(0)}%
-                          </div>
+	                <div 
+	                  key={ideia.id} 
+	                  className="modern-card rounded-xl p-6 cursor-pointer transform hover:scale-[1.02] transition-all duration-200"
+	                  onClick={() => handleCardClick(ideia)}
+	                >
+	                  <div className="flex justify-between items-start mb-2">
+	                    <h2 className="text-2xl font-bold text-gray-900">
+	                      {ideia.titulo}
+	                    </h2>
+	                    <div className="flex gap-2 items-center">
+	                      {similaridade !== null && similaridade !== undefined && (
+	                        <div className="tooltip" data-tip={t('busca.similaridade', { percent: (similaridade * 100).toFixed(1) })}>
+	                          <div className="badge badge-success badge-lg">
+	                            {(similaridade * 100).toFixed(0)}%
+	                          </div>
                         </div>
                       )}
-                      {ideia.tag && (
-                        <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-gradient-to-r from-indigo-100 to-purple-100 text-indigo-700">
-                          {ideia.tag}
-                        </span>
-                      )}
-                    </div>
-                  </div>
+	                      {ideia.tag && (
+	                        <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-gradient-to-r from-indigo-100 to-purple-100 text-indigo-700">
+	                          {ideia.tag}
+	                        </span>
+	                      )}
+	                      <IdeiaCardMenu
+	                        ideia={ideia}
+	                        onOpenDetails={() => handleCardClick(ideia)}
+	                        onOpenProject={() => handleCardClick(ideia, 'project')}
+	                        onOpenSchedule={() => handleCardClick(ideia, 'agenda')}
+	                        onDelete={() => handleExcluir(ideia)}
+	                      />
+	                    </div>
+	                  </div>
                   <p className="text-gray-700 whitespace-pre-wrap mb-3 line-clamp-3">
                     {ideia.ideia}
                   </p>
@@ -402,8 +454,14 @@ function Busca() {
         onClose={handleCloseModal}
         onEdit={handleEdit}
         onCopy={handleCopy}
+        onScheduleIdea={handleScheduleIdea}
+        agendandoIdeia={agendandoIdeia}
+        kanbanHistory={kanbanHistory}
+        loadingKanbanHistory={loadingKanbanHistory}
         titulosSugeridos={titulosSugeridos}
         tagsSugeridas={tagsSugeridas}
+        compactActions
+        initialAction={acaoModalInicial}
       />
     </div>
   )

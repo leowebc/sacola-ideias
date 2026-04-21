@@ -96,6 +96,21 @@ function Navbar() {
                 <span>{t('nav.buscar')}</span>
               </span>
             </Link>
+            <Link
+              to="/app/kanban"
+              className={`px-4 py-2 rounded-lg font-medium transition-all duration-200 ${
+                isActive('/app/kanban')
+                  ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-lg shadow-indigo-500/30'
+                  : 'text-gray-600 border border-purple-400 hover:text-indigo-600 hover:bg-gray-100 hover:border-indigo-300'
+              }`}
+            >
+              <span className="flex items-center space-x-2">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h6v6H4V6zm10 0h6v4h-6V6zM4 16h6v4H4v-4zm10-2h6v6h-6v-6z" />
+                </svg>
+                <span>{t('nav.kanban', { defaultValue: 'Kanban' })}</span>
+              </span>
+            </Link>
             {user && (
               <div className="flex items-center space-x-2 ml-2">
                 {user.foto_url && !imageError ? (
@@ -139,4 +154,3 @@ function Navbar() {
 }
 
 export default Navbar
-

@@ -4,6 +4,8 @@
     "subtitle": "Sistema Inteligente de Anotações",
     "cadastrar": "Cadastrar",
     "buscar": "Buscar",
+    "kanban": "Kanban",
+    "agenda": "Agenda",
     "faleConosco": "Fale Conosco",
     "limpar": "Limpar localStorage?",
     "limparDesc": "Limpar dados antigos do localStorage? (API key será preservada)",

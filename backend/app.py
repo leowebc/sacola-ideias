@@ -6,7 +6,7 @@ Conecta com PostgreSQL usando pgvector
 from fastapi import FastAPI, HTTPException, Depends, Header, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime, timedelta, timezone
 import psycopg2
@@ -67,6 +67,9 @@ PRO_LIMITE_EMBEDDINGS = int(os.getenv("PRO_LIMITE_EMBEDDINGS", "1000"))
 FREE_LIMITE_BUSCAS = int(os.getenv("FREE_LIMITE_BUSCAS", "10"))
 FREE_LIMITE_EMBEDDINGS = int(os.getenv("FREE_LIMITE_EMBEDDINGS", "10"))
 TRIAL_DIAS = int(os.getenv("TRIAL_DIAS", "3"))
+KANBAN_STATUS_ORDER = ["novo", "verificando", "em_producao", "teste", "fechado"]
+KANBAN_STATUS_SET = set(KANBAN_STATUS_ORDER)
+DEFAULT_KANBAN_NAME = "Kanban principal"
 
 if STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
@@ -93,11 +96,881 @@ def gerar_embedding(texto: str):
         print(f"Erro ao gerar embedding: {e}")
         return None
 
+
+def ensure_ideias_kanban_columns():
+    """Garante as colunas mínimas do Kanban sem exigir migração manual."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('public.ideias')")
+            if not cur.fetchone()[0]:
+                print("⚠️  Tabela public.ideias ausente; Kanban não foi inicializado.")
+                return
+
+            cur.execute(
+                """
+                ALTER TABLE ideias
+                ADD COLUMN IF NOT EXISTS kanban_status VARCHAR(30)
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE ideias
+                ADD COLUMN IF NOT EXISTS kanban_ativo BOOLEAN DEFAULT FALSE
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE ideias
+                ADD COLUMN IF NOT EXISTS kanban_updated_at TIMESTAMPTZ
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE ideias
+                ADD COLUMN IF NOT EXISTS agenda_data TIMESTAMPTZ
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE ideias
+                ADD COLUMN IF NOT EXISTS agenda_observacao TEXT
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ideias_kanban_historico (
+                    id BIGSERIAL PRIMARY KEY,
+                    ideia_id BIGINT NOT NULL REFERENCES ideias(id) ON DELETE CASCADE,
+                    usuario_id BIGINT NOT NULL,
+                    de_status VARCHAR(30),
+                    para_status VARCHAR(30) NOT NULL,
+                    observacao TEXT,
+                    moved_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_ideias_kanban_historico_ideia_data
+                ON ideias_kanban_historico (ideia_id, moved_at DESC)
+                """
+            )
+            cur.execute(
+                """
+                UPDATE ideias
+                SET kanban_ativo = FALSE
+                WHERE kanban_ativo IS NULL
+                """
+            )
+            conn.commit()
+            print("✅ Colunas do Kanban verificadas em ideias.")
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"⚠️  Não foi possível preparar colunas do Kanban: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+
+def _serialize_datetime_fields(record: dict, fields: List[str]) -> dict:
+    serialized = dict(record)
+    for field in fields:
+        value = serialized.get(field)
+        if value and hasattr(value, "isoformat"):
+            serialized[field] = value.isoformat()
+    return serialized
+
+
+def _validate_kanban_status(status: str) -> str:
+    normalized = (status or "").strip().lower()
+    if normalized not in KANBAN_STATUS_SET:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Status inválido para o Kanban. Use: {', '.join(KANBAN_STATUS_ORDER)}",
+        )
+    return normalized
+
+
+def _insert_kanban_history(cur, ideia_id: int, usuario_id: int, para_status: str, de_status: Optional[str] = None, observacao: Optional[str] = None):
+    cur.execute(
+        """
+        INSERT INTO ideias_kanban_historico (ideia_id, usuario_id, de_status, para_status, observacao)
+        VALUES (%s, %s, %s, %s, %s)
+        """,
+        (ideia_id, usuario_id, de_status, para_status, observacao),
+    )
+
+
+def _constraint_exists(cur, table_name: str, constraint_name: str) -> bool:
+    cur.execute(
+        """
+        SELECT 1
+        FROM information_schema.table_constraints
+        WHERE table_schema = 'public'
+          AND table_name = %s
+          AND constraint_name = %s
+        """,
+        (table_name, constraint_name),
+    )
+    return cur.fetchone() is not None
+
+
+def ensure_workspace_schema():
+    """Garante as tabelas de espaços/projetos e o vínculo de ideias a projetos."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    to_regclass('public.usuarios'),
+                    to_regclass('public.ideias')
+                """
+            )
+            usuarios_table, ideias_table = cur.fetchone()
+            if not usuarios_table or not ideias_table:
+                print("⚠️  Tabelas public.usuarios/public.ideias ausentes; workspace não foi inicializado.")
+                return
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS espacos (
+                    id BIGSERIAL PRIMARY KEY,
+                    usuario_id BIGINT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+                    nome VARCHAR(160) NOT NULL,
+                    descricao TEXT,
+                    cor VARCHAR(20),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS projetos (
+                    id BIGSERIAL PRIMARY KEY,
+                    espaco_id BIGINT NOT NULL REFERENCES espacos(id) ON DELETE CASCADE,
+                    usuario_id BIGINT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+                    nome VARCHAR(160) NOT NULL,
+                    descricao TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_espacos_usuario_nome
+                ON espacos (usuario_id, lower(nome))
+                """
+            )
+            cur.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_projetos_espaco_nome
+                ON projetos (espaco_id, lower(nome))
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_projetos_usuario_espaco
+                ON projetos (usuario_id, espaco_id)
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE ideias
+                ADD COLUMN IF NOT EXISTS projeto_id BIGINT
+                """
+            )
+            if not _constraint_exists(cur, "ideias", "ideias_projeto_id_fkey"):
+                cur.execute(
+                    """
+                    ALTER TABLE ideias
+                    ADD CONSTRAINT ideias_projeto_id_fkey
+                    FOREIGN KEY (projeto_id) REFERENCES projetos(id) ON DELETE SET NULL
+                    """
+                )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_ideias_usuario_projeto
+                ON ideias (usuario_id, projeto_id)
+                """
+            )
+            conn.commit()
+            print("✅ Estrutura de espaços e projetos verificada.")
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"⚠️  Não foi possível preparar espaços e projetos: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+
+IDEIA_SELECT_FIELDS = """
+    i.id,
+    i.titulo,
+    i.tag,
+    i.ideia,
+    i.data,
+    i.created_at,
+    i.updated_at,
+    i.kanban_ativo,
+    i.kanban_status,
+    i.kanban_updated_at,
+    i.agenda_data,
+    i.agenda_observacao,
+    i.projeto_id,
+    p.nome AS projeto_nome,
+    e.id AS espaco_id,
+    e.nome AS espaco_nome
+"""
+
+
+def _fetch_workspace_tree(cur, usuario_id: int) -> List[dict]:
+    cur.execute(
+        """
+        SELECT
+            e.id,
+            e.nome,
+            e.descricao,
+            e.cor,
+            e.created_at,
+            e.updated_at
+        FROM espacos e
+        WHERE e.usuario_id = %s
+        ORDER BY lower(e.nome), e.id
+        """,
+        (usuario_id,),
+    )
+    espacos = {
+        row["id"]: {
+            **_serialize_datetime_fields(dict(row), ["created_at", "updated_at"]),
+            "projetos": [],
+        }
+        for row in cur.fetchall()
+    }
+
+    cur.execute(
+        """
+        SELECT
+            p.id,
+            p.espaco_id,
+            p.nome,
+            p.descricao,
+            p.created_at,
+            p.updated_at,
+            COUNT(i.id) AS ideias_count,
+            COUNT(CASE WHEN i.kanban_ativo IS TRUE THEN 1 END) AS kanban_count
+        FROM projetos p
+        LEFT JOIN ideias i
+            ON i.projeto_id = p.id
+           AND i.usuario_id = p.usuario_id
+        WHERE p.usuario_id = %s
+        GROUP BY p.id, p.espaco_id, p.nome, p.descricao, p.created_at, p.updated_at
+        ORDER BY lower(p.nome), p.id
+        """,
+        (usuario_id,),
+    )
+    for projeto in cur.fetchall():
+        espaco = espacos.get(projeto["espaco_id"])
+        if not espaco:
+            continue
+        espaco["projetos"].append(
+            {
+                **_serialize_datetime_fields(dict(projeto), ["created_at", "updated_at"]),
+                "ideias_count": int(projeto.get("ideias_count") or 0),
+                "kanban_count": int(projeto.get("kanban_count") or 0),
+            }
+        )
+
+    return list(espacos.values())
+
+
+def _fetch_idea_record(cur, ideia_id: int, usuario_id: int) -> Optional[dict]:
+    cur.execute(
+        f"""
+        SELECT
+            {IDEIA_SELECT_FIELDS}
+        FROM ideias i
+        LEFT JOIN projetos p
+            ON p.id = i.projeto_id
+           AND p.usuario_id = i.usuario_id
+        LEFT JOIN espacos e
+            ON e.id = p.espaco_id
+        WHERE i.id = %s AND i.usuario_id = %s
+        """,
+        (ideia_id, usuario_id),
+    )
+    ideia = cur.fetchone()
+    if not ideia:
+        return None
+    return _serialize_datetime_fields(
+        dict(ideia),
+        ["data", "created_at", "updated_at", "kanban_updated_at", "agenda_data"],
+    )
+
+
+def _fetch_ideas_for_user(cur, usuario_id: int) -> List[dict]:
+    cur.execute(
+        f"""
+        SELECT
+            {IDEIA_SELECT_FIELDS}
+        FROM ideias i
+        LEFT JOIN projetos p
+            ON p.id = i.projeto_id
+           AND p.usuario_id = i.usuario_id
+        LEFT JOIN espacos e
+            ON e.id = p.espaco_id
+        WHERE i.usuario_id = %s
+        ORDER BY i.kanban_updated_at DESC NULLS LAST, i.data DESC
+        """,
+        (usuario_id,),
+    )
+    return [
+        _serialize_datetime_fields(
+            dict(ideia),
+            ["data", "created_at", "updated_at", "kanban_updated_at", "agenda_data"],
+        )
+        for ideia in cur.fetchall()
+    ]
+
+
+def _validate_project_access(cur, projeto_id: Optional[int], usuario_id: int) -> Optional[int]:
+    if projeto_id in (None, ""):
+        return None
+
+    try:
+        projeto_id = int(projeto_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Projeto inválido")
+
+    cur.execute(
+        """
+        SELECT p.id
+        FROM projetos p
+        WHERE p.id = %s AND p.usuario_id = %s
+        """,
+        (projeto_id, usuario_id),
+    )
+    if not cur.fetchone():
+        raise HTTPException(status_code=404, detail="Projeto não encontrado para este usuário")
+    return projeto_id
+
+
+def _normalize_workspace_name(value: str, entity_label: str) -> str:
+    normalized = (value or "").strip()
+    if not normalized:
+        raise HTTPException(status_code=400, detail=f"Nome de {entity_label} é obrigatório")
+    if len(normalized) > 160:
+        raise HTTPException(status_code=400, detail=f"Nome de {entity_label} deve ter no máximo 160 caracteres")
+    return normalized
+
+def ensure_workspace_schema():
+    """Garante as tabelas de espacos, projetos, kanbans e os vinculos das ideias."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    to_regclass('public.usuarios'),
+                    to_regclass('public.ideias')
+                """
+            )
+            usuarios_table, ideias_table = cur.fetchone()
+            if not usuarios_table or not ideias_table:
+                print("Tabelas public.usuarios/public.ideias ausentes; workspace nao foi inicializado.")
+                return
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS espacos (
+                    id BIGSERIAL PRIMARY KEY,
+                    usuario_id BIGINT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+                    nome VARCHAR(160) NOT NULL,
+                    descricao TEXT,
+                    cor VARCHAR(20),
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS projetos (
+                    id BIGSERIAL PRIMARY KEY,
+                    espaco_id BIGINT NOT NULL REFERENCES espacos(id) ON DELETE CASCADE,
+                    usuario_id BIGINT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+                    nome VARCHAR(160) NOT NULL,
+                    descricao TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS kanbans (
+                    id BIGSERIAL PRIMARY KEY,
+                    projeto_id BIGINT NOT NULL REFERENCES projetos(id) ON DELETE CASCADE,
+                    usuario_id BIGINT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+                    nome VARCHAR(160) NOT NULL,
+                    descricao TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS kanban_cards (
+                    id BIGSERIAL PRIMARY KEY,
+                    kanban_id BIGINT NOT NULL REFERENCES kanbans(id) ON DELETE CASCADE,
+                    projeto_id BIGINT NOT NULL REFERENCES projetos(id) ON DELETE CASCADE,
+                    usuario_id BIGINT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+                    titulo VARCHAR(200) NOT NULL,
+                    descricao TEXT,
+                    kanban_status VARCHAR(30) NOT NULL DEFAULT 'novo',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_espacos_usuario_nome
+                ON espacos (usuario_id, lower(nome))
+                """
+            )
+            cur.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_projetos_espaco_nome
+                ON projetos (espaco_id, lower(nome))
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_projetos_usuario_espaco
+                ON projetos (usuario_id, espaco_id)
+                """
+            )
+            cur.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_kanbans_projeto_nome
+                ON kanbans (projeto_id, lower(nome))
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_kanbans_usuario_projeto
+                ON kanbans (usuario_id, projeto_id)
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_kanban_cards_usuario_kanban
+                ON kanban_cards (usuario_id, kanban_id)
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_kanban_cards_usuario_projeto
+                ON kanban_cards (usuario_id, projeto_id)
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE ideias
+                ADD COLUMN IF NOT EXISTS projeto_id BIGINT
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE ideias
+                ADD COLUMN IF NOT EXISTS kanban_id BIGINT
+                """
+            )
+            if not _constraint_exists(cur, "ideias", "ideias_projeto_id_fkey"):
+                cur.execute(
+                    """
+                    ALTER TABLE ideias
+                    ADD CONSTRAINT ideias_projeto_id_fkey
+                    FOREIGN KEY (projeto_id) REFERENCES projetos(id) ON DELETE SET NULL
+                    """
+                )
+            if not _constraint_exists(cur, "ideias", "ideias_kanban_id_fkey"):
+                cur.execute(
+                    """
+                    ALTER TABLE ideias
+                    ADD CONSTRAINT ideias_kanban_id_fkey
+                    FOREIGN KEY (kanban_id) REFERENCES kanbans(id) ON DELETE SET NULL
+                    """
+                )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_ideias_usuario_projeto
+                ON ideias (usuario_id, projeto_id)
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_ideias_usuario_kanban
+                ON ideias (usuario_id, kanban_id)
+                """
+            )
+            cur.execute(
+                """
+                INSERT INTO kanbans (projeto_id, usuario_id, nome, descricao)
+                SELECT
+                    p.id,
+                    p.usuario_id,
+                    %s,
+                    'Quadro inicial criado automaticamente'
+                FROM projetos p
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM kanbans k
+                    WHERE k.projeto_id = p.id
+                )
+                """,
+                (DEFAULT_KANBAN_NAME,),
+            )
+            cur.execute(
+                """
+                WITH primeiro_kanban AS (
+                    SELECT DISTINCT ON (k.projeto_id)
+                        k.projeto_id,
+                        k.id
+                    FROM kanbans k
+                    ORDER BY k.projeto_id, lower(k.nome), k.id
+                )
+                UPDATE ideias i
+                SET kanban_id = pk.id
+                FROM primeiro_kanban pk
+                WHERE i.projeto_id = pk.projeto_id
+                  AND i.kanban_ativo IS TRUE
+                  AND i.kanban_id IS NULL
+                """
+            )
+            conn.commit()
+            print("Estrutura de espacos, projetos e kanbans verificada.")
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"Nao foi possivel preparar espacos, projetos e kanbans: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+
+IDEIA_SELECT_FIELDS = """
+    i.id,
+    i.titulo,
+    i.tag,
+    i.ideia,
+    i.data,
+    i.created_at,
+    i.updated_at,
+    i.kanban_id,
+    k.nome AS kanban_nome,
+    i.kanban_ativo,
+    i.kanban_status,
+    i.kanban_updated_at,
+    i.agenda_data,
+    i.agenda_observacao,
+    i.projeto_id,
+    p.nome AS projeto_nome,
+    e.id AS espaco_id,
+    e.nome AS espaco_nome
+"""
+
+
+def _serialize_kanban_record(record: dict) -> dict:
+    serialized = _serialize_datetime_fields(dict(record), ["created_at", "updated_at"])
+    serialized["cards_count"] = int(record.get("cards_count") or 0)
+    return serialized
+
+
+def _serialize_kanban_card_record(record: dict) -> dict:
+    return _serialize_datetime_fields(dict(record), ["created_at", "updated_at"])
+
+
+def _fetch_workspace_projects(cur, usuario_id: int, espaco_id: Optional[int] = None) -> List[dict]:
+    filters = ["p.usuario_id = %s"]
+    params: List[object] = [usuario_id, usuario_id, usuario_id]
+
+    if espaco_id is not None:
+        filters.append("p.espaco_id = %s")
+        params.append(espaco_id)
+
+    cur.execute(
+        f"""
+        WITH ideias_stats AS (
+            SELECT
+                projeto_id,
+                COUNT(*) AS ideias_count,
+                COUNT(CASE WHEN kanban_ativo IS TRUE THEN 1 END) AS ideias_no_kanban
+            FROM ideias
+            WHERE usuario_id = %s
+            GROUP BY projeto_id
+        ),
+        cards_stats AS (
+            SELECT
+                projeto_id,
+                COUNT(*) AS cards_count
+            FROM kanban_cards
+            WHERE usuario_id = %s
+            GROUP BY projeto_id
+        )
+        SELECT
+            p.id,
+            p.espaco_id,
+            p.nome,
+            p.descricao,
+            p.created_at,
+            p.updated_at,
+            COALESCE(ideias_stats.ideias_count, 0) AS ideias_count,
+            COALESCE(ideias_stats.ideias_no_kanban, 0) + COALESCE(cards_stats.cards_count, 0) AS kanban_count
+        FROM projetos p
+        LEFT JOIN ideias_stats
+            ON ideias_stats.projeto_id = p.id
+        LEFT JOIN cards_stats
+            ON cards_stats.projeto_id = p.id
+        WHERE {' AND '.join(filters)}
+        ORDER BY lower(p.nome), p.id
+        """,
+        tuple(params),
+    )
+    return cur.fetchall()
+
+
+def _fetch_project_kanbans(cur, usuario_id: int) -> dict:
+    cur.execute(
+        """
+        WITH ideias_stats AS (
+            SELECT
+                kanban_id,
+                COUNT(*) AS cards_count
+            FROM ideias
+            WHERE usuario_id = %s
+              AND kanban_ativo IS TRUE
+            GROUP BY kanban_id
+        ),
+        cards_stats AS (
+            SELECT
+                kanban_id,
+                COUNT(*) AS cards_count
+            FROM kanban_cards
+            WHERE usuario_id = %s
+            GROUP BY kanban_id
+        )
+        SELECT
+            k.id,
+            k.projeto_id,
+            k.nome,
+            k.descricao,
+            k.created_at,
+            k.updated_at,
+            COALESCE(ideias_stats.cards_count, 0) + COALESCE(cards_stats.cards_count, 0) AS cards_count
+        FROM kanbans k
+        LEFT JOIN ideias_stats
+            ON ideias_stats.kanban_id = k.id
+        LEFT JOIN cards_stats
+            ON cards_stats.kanban_id = k.id
+        WHERE k.usuario_id = %s
+        ORDER BY lower(k.nome), k.id
+        """,
+        (usuario_id, usuario_id, usuario_id),
+    )
+    kanbans_by_project = {}
+    for row in cur.fetchall():
+        kanbans_by_project.setdefault(row["projeto_id"], []).append(_serialize_kanban_record(row))
+    return kanbans_by_project
+
+
+def _build_project_workspace_response(projeto: dict, kanbans_by_project: dict) -> dict:
+    return {
+        **_serialize_datetime_fields(dict(projeto), ["created_at", "updated_at"]),
+        "ideias_count": int(projeto.get("ideias_count") or 0),
+        "kanban_count": int(projeto.get("kanban_count") or 0),
+        "kanbans": kanbans_by_project.get(projeto["id"], []),
+    }
+
+
+def _fetch_workspace_tree(cur, usuario_id: int) -> List[dict]:
+    cur.execute(
+        """
+        SELECT
+            e.id,
+            e.nome,
+            e.descricao,
+            e.cor,
+            e.created_at,
+            e.updated_at
+        FROM espacos e
+        WHERE e.usuario_id = %s
+        ORDER BY lower(e.nome), e.id
+        """,
+        (usuario_id,),
+    )
+    espacos = {
+        row["id"]: {
+            **_serialize_datetime_fields(dict(row), ["created_at", "updated_at"]),
+            "projetos": [],
+        }
+        for row in cur.fetchall()
+    }
+
+    kanbans_by_project = _fetch_project_kanbans(cur, usuario_id)
+
+    for projeto in _fetch_workspace_projects(cur, usuario_id):
+        espaco = espacos.get(projeto["espaco_id"])
+        if not espaco:
+            continue
+        espaco["projetos"].append(_build_project_workspace_response(projeto, kanbans_by_project))
+
+    return list(espacos.values())
+
+
+def _fetch_idea_record(cur, ideia_id: int, usuario_id: int) -> Optional[dict]:
+    cur.execute(
+        f"""
+        SELECT
+            {IDEIA_SELECT_FIELDS}
+        FROM ideias i
+        LEFT JOIN kanbans k
+            ON k.id = i.kanban_id
+           AND k.usuario_id = i.usuario_id
+        LEFT JOIN projetos p
+            ON p.id = i.projeto_id
+           AND p.usuario_id = i.usuario_id
+        LEFT JOIN espacos e
+            ON e.id = p.espaco_id
+        WHERE i.id = %s AND i.usuario_id = %s
+        """,
+        (ideia_id, usuario_id),
+    )
+    ideia = cur.fetchone()
+    if not ideia:
+        return None
+    return _serialize_datetime_fields(
+        dict(ideia),
+        ["data", "created_at", "updated_at", "kanban_updated_at", "agenda_data"],
+    )
+
+
+def _fetch_ideas_for_user(cur, usuario_id: int) -> List[dict]:
+    cur.execute(
+        f"""
+        SELECT
+            {IDEIA_SELECT_FIELDS}
+        FROM ideias i
+        LEFT JOIN kanbans k
+            ON k.id = i.kanban_id
+           AND k.usuario_id = i.usuario_id
+        LEFT JOIN projetos p
+            ON p.id = i.projeto_id
+           AND p.usuario_id = i.usuario_id
+        LEFT JOIN espacos e
+            ON e.id = p.espaco_id
+        WHERE i.usuario_id = %s
+        ORDER BY i.kanban_updated_at DESC NULLS LAST, i.data DESC
+        """,
+        (usuario_id,),
+    )
+    return [
+        _serialize_datetime_fields(
+            dict(ideia),
+            ["data", "created_at", "updated_at", "kanban_updated_at", "agenda_data"],
+        )
+        for ideia in cur.fetchall()
+    ]
+
+
+def _fetch_kanban_card_record(cur, card_id: int, usuario_id: int) -> Optional[dict]:
+    cur.execute(
+        """
+        SELECT
+            kc.id,
+            kc.kanban_id,
+            kc.projeto_id,
+            kc.titulo,
+            kc.descricao,
+            kc.kanban_status,
+            kc.created_at,
+            kc.updated_at
+        FROM kanban_cards kc
+        WHERE kc.id = %s AND kc.usuario_id = %s
+        """,
+        (card_id, usuario_id),
+    )
+    card = cur.fetchone()
+    return _serialize_kanban_card_record(card) if card else None
+
+
+def _fetch_kanban_cards_for_kanban(cur, kanban_id: int, usuario_id: int) -> List[dict]:
+    cur.execute(
+        """
+        SELECT
+            kc.id,
+            kc.kanban_id,
+            kc.projeto_id,
+            kc.titulo,
+            kc.descricao,
+            kc.kanban_status,
+            kc.created_at,
+            kc.updated_at
+        FROM kanban_cards kc
+        WHERE kc.kanban_id = %s
+          AND kc.usuario_id = %s
+        ORDER BY kc.updated_at DESC, kc.id DESC
+        """,
+        (kanban_id, usuario_id),
+    )
+    return [_serialize_kanban_card_record(card) for card in cur.fetchall()]
+
+
+def _validate_kanban_access(cur, kanban_id: Optional[int], usuario_id: int, projeto_id: Optional[int] = None) -> Optional[dict]:
+    if kanban_id in (None, ""):
+        return None
+
+    try:
+        kanban_id = int(kanban_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Kanban invalido")
+
+    cur.execute(
+        """
+        SELECT k.id, k.projeto_id, k.nome
+        FROM kanbans k
+        WHERE k.id = %s AND k.usuario_id = %s
+        """,
+        (kanban_id, usuario_id),
+    )
+    kanban = cur.fetchone()
+    if not kanban:
+        raise HTTPException(status_code=404, detail="Kanban nao encontrado para este usuario")
+
+    if projeto_id is not None and kanban["projeto_id"] != projeto_id:
+        raise HTTPException(status_code=400, detail="Kanban nao pertence ao projeto informado")
+
+    return dict(kanban)
+
+
 app = FastAPI(title="Sacola de Ideias API")
 
 # Evento de startup para verificar endpoints registrados e testar conexão
 @app.on_event("startup")
 async def startup_event():
+    print("=" * 80)
+    ensure_workspace_schema()
+    ensure_ideias_kanban_columns()
     print("=" * 80)
     # Diagnóstico rápido do Stripe (não expõe segredos)
     try:
@@ -228,6 +1101,7 @@ class IdeiaBase(BaseModel):
     titulo: str
     tag: Optional[str] = None
     ideia: str
+    projeto_id: Optional[int] = None
 
 class IdeiaCreate(IdeiaBase):
     pass
@@ -240,6 +1114,16 @@ class IdeiaResponse(IdeiaBase):
     data: datetime
     created_at: datetime
     updated_at: datetime
+    kanban_id: Optional[int] = None
+    kanban_nome: Optional[str] = None
+    kanban_ativo: Optional[bool] = False
+    kanban_status: Optional[str] = None
+    kanban_updated_at: Optional[datetime] = None
+    agenda_data: Optional[datetime] = None
+    agenda_observacao: Optional[str] = None
+    projeto_nome: Optional[str] = None
+    espaco_id: Optional[int] = None
+    espaco_nome: Optional[str] = None
     
     class Config:
         from_attributes = True
@@ -260,6 +1144,113 @@ class BuscaResponse(BaseModel):
     ideia: str
     data: datetime
     similarity: float
+
+
+class KanbanStatusUpdate(BaseModel):
+    kanban_status: str
+
+
+class KanbanStartRequest(BaseModel):
+    kanban_id: int
+    kanban_status: Optional[str] = None
+
+
+class AgendaUpdate(BaseModel):
+    agenda_data: Optional[datetime] = None
+    agenda_observacao: Optional[str] = None
+
+
+class EspacoCreate(BaseModel):
+    nome: str
+    descricao: Optional[str] = None
+    cor: Optional[str] = None
+
+
+class EspacoUpdate(BaseModel):
+    nome: str
+
+
+class ProjetoCreate(BaseModel):
+    espaco_id: int
+    nome: str
+    descricao: Optional[str] = None
+    kanban_nome_inicial: Optional[str] = None
+
+
+class ProjetoVinculoUpdate(BaseModel):
+    projeto_id: Optional[int] = None
+    kanban_id: Optional[int] = None
+
+
+class KanbanCreate(BaseModel):
+    projeto_id: int
+    nome: str
+    descricao: Optional[str] = None
+
+
+class KanbanWorkspaceResponse(BaseModel):
+    id: int
+    projeto_id: int
+    nome: str
+    descricao: Optional[str] = None
+    cards_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProjetoWorkspaceResponse(BaseModel):
+    id: int
+    espaco_id: int
+    nome: str
+    descricao: Optional[str] = None
+    ideias_count: int = 0
+    kanban_count: int = 0
+    kanbans: List[KanbanWorkspaceResponse] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class EspacoWorkspaceResponse(BaseModel):
+    id: int
+    nome: str
+    descricao: Optional[str] = None
+    cor: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    projetos: List[ProjetoWorkspaceResponse] = Field(default_factory=list)
+
+
+class KanbanHistoryEntry(BaseModel):
+    id: int
+    ideia_id: int
+    usuario_id: int
+    de_status: Optional[str] = None
+    para_status: str
+    observacao: Optional[str] = None
+    moved_at: datetime
+
+
+class KanbanCardCreate(BaseModel):
+    titulo: str
+    descricao: Optional[str] = None
+    kanban_status: Optional[str] = "novo"
+
+
+class KanbanCardUpdate(BaseModel):
+    titulo: Optional[str] = None
+    descricao: Optional[str] = None
+    kanban_status: Optional[str] = None
+
+
+class KanbanCardResponse(BaseModel):
+    id: int
+    kanban_id: int
+    projeto_id: int
+    titulo: str
+    descricao: Optional[str] = None
+    kanban_status: str
+    created_at: datetime
+    updated_at: datetime
 
 class BackfillEmbeddingsRequest(BaseModel):
     limite: Optional[int] = 50
@@ -484,6 +1475,469 @@ async def obter_usuario_assinante(user: dict = Depends(obter_usuario_atual)) -> 
 def root():
     return {"message": "Sacola de Ideias API", "status": "online"}
 
+
+@app.get("/api/workspace", response_model=List[EspacoWorkspaceResponse])
+def buscar_workspace(user: dict = Depends(obter_usuario_atual)):
+    """Retorna a árvore de espaços e projetos do usuário autenticado."""
+    usuario_id = user["user_id"]
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            return _fetch_workspace_tree(cur, usuario_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao buscar workspace: {str(e)}")
+    finally:
+        conn.close()
+
+
+@app.post("/api/espacos", response_model=EspacoWorkspaceResponse)
+def criar_espaco(payload: EspacoCreate, user: dict = Depends(obter_usuario_atual)):
+    """Cria um novo espaço para o usuário autenticado."""
+    usuario_id = user["user_id"]
+    nome = _normalize_workspace_name(payload.nome, "espaço")
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                INSERT INTO espacos (usuario_id, nome, descricao, cor)
+                VALUES (%s, %s, %s, %s)
+                RETURNING id, nome, descricao, cor, created_at, updated_at
+                """,
+                (
+                    usuario_id,
+                    nome,
+                    payload.descricao.strip() if payload.descricao else None,
+                    payload.cor.strip() if payload.cor else None,
+                ),
+            )
+            espaco = cur.fetchone()
+            conn.commit()
+            return {
+                **_serialize_datetime_fields(dict(espaco), ["created_at", "updated_at"]),
+                "projetos": [],
+            }
+    except psycopg2.errors.UniqueViolation:
+        conn.rollback()
+        raise HTTPException(status_code=409, detail="Já existe um espaço com esse nome")
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao criar espaço: {str(e)}")
+    finally:
+        conn.close()
+
+
+@app.patch("/api/espacos/{espaco_id}", response_model=EspacoWorkspaceResponse)
+def atualizar_espaco(
+    espaco_id: int,
+    payload: EspacoUpdate,
+    user: dict = Depends(obter_usuario_atual),
+):
+    """Renomeia um espaço do usuário autenticado."""
+    usuario_id = user["user_id"]
+    nome = _normalize_workspace_name(payload.nome, "espaço")
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                UPDATE espacos
+                SET nome = %s,
+                    updated_at = NOW()
+                WHERE id = %s AND usuario_id = %s
+                RETURNING id, nome, descricao, cor, created_at, updated_at
+                """,
+                (nome, espaco_id, usuario_id),
+            )
+            espaco = cur.fetchone()
+            if not espaco:
+                raise HTTPException(status_code=404, detail="Espaço não encontrado")
+
+            projetos_rows = _fetch_workspace_projects(cur, usuario_id, espaco_id)
+            kanbans_by_project = _fetch_project_kanbans(cur, usuario_id)
+            projetos = [
+                _build_project_workspace_response(projeto, kanbans_by_project)
+                for projeto in projetos_rows
+            ]
+            conn.commit()
+            return {
+                **_serialize_datetime_fields(dict(espaco), ["created_at", "updated_at"]),
+                "projetos": projetos,
+            }
+    except psycopg2.errors.UniqueViolation:
+        conn.rollback()
+        raise HTTPException(status_code=409, detail="Já existe um espaço com esse nome")
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao atualizar espaço: {str(e)}")
+    finally:
+        conn.close()
+
+
+@app.delete("/api/espacos/{espaco_id}")
+def excluir_espaco(espaco_id: int, user: dict = Depends(obter_usuario_atual)):
+    """Exclui um espaço do usuário autenticado."""
+    usuario_id = user["user_id"]
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                DELETE FROM espacos
+                WHERE id = %s AND usuario_id = %s
+                RETURNING id
+                """,
+                (espaco_id, usuario_id),
+            )
+            espaco = cur.fetchone()
+            if not espaco:
+                raise HTTPException(status_code=404, detail="Espaço não encontrado")
+            conn.commit()
+            return {"detail": "Espaço excluído com sucesso"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao excluir espaço: {str(e)}")
+    finally:
+        conn.close()
+
+
+@app.post("/api/projetos", response_model=ProjetoWorkspaceResponse)
+def criar_projeto(payload: ProjetoCreate, user: dict = Depends(obter_usuario_atual)):
+    """Cria um novo projeto dentro de um espaço do usuário."""
+    usuario_id = user["user_id"]
+    nome = _normalize_workspace_name(payload.nome, "projeto")
+    kanban_nome_inicial = _normalize_workspace_name(
+        payload.kanban_nome_inicial or DEFAULT_KANBAN_NAME,
+        "kanban",
+    )
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id
+                FROM espacos
+                WHERE id = %s AND usuario_id = %s
+                """,
+                (payload.espaco_id, usuario_id),
+            )
+            espaco = cur.fetchone()
+            if not espaco:
+                raise HTTPException(status_code=404, detail="Espaço não encontrado para este usuário")
+
+            cur.execute(
+                """
+                INSERT INTO projetos (espaco_id, usuario_id, nome, descricao)
+                VALUES (%s, %s, %s, %s)
+                RETURNING id, espaco_id, nome, descricao, created_at, updated_at
+                """,
+                (
+                    payload.espaco_id,
+                    usuario_id,
+                    nome,
+                    payload.descricao.strip() if payload.descricao else None,
+                ),
+            )
+            projeto = cur.fetchone()
+            cur.execute(
+                """
+                INSERT INTO kanbans (projeto_id, usuario_id, nome, descricao)
+                VALUES (%s, %s, %s, %s)
+                RETURNING id, projeto_id, nome, descricao, created_at, updated_at
+                """,
+                (
+                    projeto["id"],
+                    usuario_id,
+                    kanban_nome_inicial,
+                    "Quadro inicial do projeto",
+                ),
+            )
+            kanban = cur.fetchone()
+            conn.commit()
+            return {
+                **_serialize_datetime_fields(dict(projeto), ["created_at", "updated_at"]),
+                "ideias_count": 0,
+                "kanban_count": 0,
+                "kanbans": [_serialize_kanban_record(kanban)],
+            }
+    except psycopg2.errors.UniqueViolation:
+        conn.rollback()
+        raise HTTPException(status_code=409, detail="Já existe um projeto com esse nome neste espaço")
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao criar projeto: {str(e)}")
+    finally:
+        conn.close()
+
+
+@app.post("/api/kanbans", response_model=KanbanWorkspaceResponse)
+def criar_kanban(payload: KanbanCreate, user: dict = Depends(obter_usuario_atual)):
+    """Cria um novo kanban dentro de um projeto do usuÃ¡rio."""
+    usuario_id = user["user_id"]
+    nome = _normalize_workspace_name(payload.nome, "kanban")
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            projeto_id = _validate_project_access(cur, payload.projeto_id, usuario_id)
+            if not projeto_id:
+                raise HTTPException(status_code=400, detail="Projeto invÃ¡lido")
+
+            cur.execute(
+                """
+                INSERT INTO kanbans (projeto_id, usuario_id, nome, descricao)
+                VALUES (%s, %s, %s, %s)
+                RETURNING id, projeto_id, nome, descricao, created_at, updated_at
+                """,
+                (
+                    projeto_id,
+                    usuario_id,
+                    nome,
+                    payload.descricao.strip() if payload.descricao else None,
+                ),
+            )
+            kanban = cur.fetchone()
+            conn.commit()
+            return _serialize_kanban_record(kanban)
+    except psycopg2.errors.UniqueViolation:
+        conn.rollback()
+        raise HTTPException(status_code=409, detail="JÃ¡ existe um kanban com esse nome neste projeto")
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao criar kanban: {str(e)}")
+    finally:
+        conn.close()
+
+
+@app.get("/api/kanbans/{kanban_id}/cards", response_model=List[KanbanCardResponse])
+def listar_cards_kanban(kanban_id: int, user: dict = Depends(obter_usuario_atual)):
+    usuario_id = user["user_id"]
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            _validate_kanban_access(cur, kanban_id, usuario_id)
+            return _fetch_kanban_cards_for_kanban(cur, kanban_id, usuario_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao buscar cards do kanban: {str(e)}")
+    finally:
+        conn.close()
+
+
+@app.post("/api/kanbans/{kanban_id}/cards", response_model=KanbanCardResponse)
+def criar_card_kanban(
+    kanban_id: int,
+    payload: KanbanCardCreate,
+    user: dict = Depends(obter_usuario_atual),
+):
+    usuario_id = user["user_id"]
+    titulo = _normalize_workspace_name(payload.titulo, "card")
+    status_final = _validate_kanban_status(payload.kanban_status or "novo")
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            kanban = _validate_kanban_access(cur, kanban_id, usuario_id)
+            if not kanban:
+                raise HTTPException(status_code=404, detail="Kanban nao encontrado")
+
+            cur.execute(
+                """
+                INSERT INTO kanban_cards (kanban_id, projeto_id, usuario_id, titulo, descricao, kanban_status)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    kanban["id"],
+                    kanban["projeto_id"],
+                    usuario_id,
+                    titulo,
+                    payload.descricao.strip() if payload.descricao else None,
+                    status_final,
+                ),
+            )
+            card = cur.fetchone()
+            card_completo = _fetch_kanban_card_record(cur, card["id"], usuario_id)
+            conn.commit()
+            return card_completo
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao criar card do kanban: {str(e)}")
+    finally:
+        conn.close()
+
+
+@app.patch("/api/kanban-cards/{card_id}", response_model=KanbanCardResponse)
+def atualizar_card_kanban(
+    card_id: int,
+    payload: KanbanCardUpdate,
+    user: dict = Depends(obter_usuario_atual),
+):
+    usuario_id = user["user_id"]
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            card_atual = _fetch_kanban_card_record(cur, card_id, usuario_id)
+            if not card_atual:
+                raise HTTPException(status_code=404, detail="Card do kanban nao encontrado")
+
+            titulo = (
+                _normalize_workspace_name(payload.titulo, "card")
+                if payload.titulo is not None
+                else card_atual["titulo"]
+            )
+            descricao = card_atual.get("descricao")
+            if payload.descricao is not None:
+                descricao = payload.descricao.strip() or None
+            status_final = (
+                _validate_kanban_status(payload.kanban_status)
+                if payload.kanban_status is not None
+                else card_atual["kanban_status"]
+            )
+
+            cur.execute(
+                """
+                UPDATE kanban_cards
+                SET titulo = %s,
+                    descricao = %s,
+                    kanban_status = %s,
+                    updated_at = NOW()
+                WHERE id = %s AND usuario_id = %s
+                RETURNING id
+                """,
+                (titulo, descricao, status_final, card_id, usuario_id),
+            )
+            card = cur.fetchone()
+            if not card:
+                raise HTTPException(status_code=404, detail="Card do kanban nao encontrado")
+
+            card_completo = _fetch_kanban_card_record(cur, card["id"], usuario_id)
+            conn.commit()
+            return card_completo
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao atualizar card do kanban: {str(e)}")
+    finally:
+        conn.close()
+
+
+@app.patch("/api/ideias/{ideia_id}/projeto", response_model=IdeiaResponse)
+def vincular_ideia_a_projeto(
+    ideia_id: int,
+    payload: ProjetoVinculoUpdate,
+    user: dict = Depends(obter_usuario_atual),
+):
+    """Vincula ou remove o vínculo de uma ideia a um projeto do usuário."""
+    usuario_id = user["user_id"]
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, projeto_id, kanban_id, kanban_status, kanban_ativo
+                FROM ideias
+                WHERE id = %s AND usuario_id = %s
+                """,
+                (ideia_id, usuario_id),
+            )
+            ideia_existente = cur.fetchone()
+            if not ideia_existente:
+                raise HTTPException(status_code=404, detail="Ideia não encontrada")
+
+            projeto_id = _validate_project_access(cur, payload.projeto_id, usuario_id)
+            kanban = _validate_kanban_access(cur, payload.kanban_id, usuario_id, projeto_id) if projeto_id else None
+            projeto_anterior = ideia_existente.get("projeto_id")
+            kanban_anterior = ideia_existente.get("kanban_id")
+            status_anterior = (ideia_existente.get("kanban_status") or "").strip().lower() or None
+            if status_anterior and status_anterior not in KANBAN_STATUS_SET:
+                status_anterior = None
+
+            possui_kanban = kanban is not None
+            mudou_kanban = (
+                projeto_id != projeto_anterior
+                or kanban_anterior != (kanban["id"] if kanban else None)
+            )
+
+            if possui_kanban:
+                kanban_status = (
+                    "novo"
+                    if mudou_kanban or not ideia_existente.get("kanban_ativo")
+                    else (status_anterior or "novo")
+                )
+                kanban_ativo = True
+                kanban_id_final = kanban["id"]
+            else:
+                kanban_status = None
+                kanban_ativo = False
+                kanban_id_final = None
+
+            cur.execute(
+                """
+                UPDATE ideias
+                SET projeto_id = %s,
+                    kanban_id = %s,
+                    kanban_ativo = %s,
+                    kanban_status = %s,
+                    kanban_updated_at = CASE
+                        WHEN %s OR %s OR %s THEN NOW()
+                        ELSE kanban_updated_at
+                    END,
+                    updated_at = NOW()
+                WHERE id = %s AND usuario_id = %s
+                """,
+                (
+                    projeto_id,
+                    kanban_id_final,
+                    kanban_ativo,
+                    kanban_status,
+                    possui_kanban,
+                    mudou_kanban,
+                    ideia_existente.get("kanban_ativo") != kanban_ativo,
+                    ideia_id,
+                    usuario_id,
+                ),
+            )
+
+            if possui_kanban and (
+                mudou_kanban
+                or not ideia_existente.get("kanban_ativo")
+                or status_anterior != kanban_status
+            ):
+                _insert_kanban_history(
+                    cur,
+                    ideia_id=ideia_id,
+                    usuario_id=usuario_id,
+                    de_status=status_anterior if ideia_existente.get("kanban_ativo") else None,
+                    para_status=kanban_status,
+                    observacao=f"Card vinculado ao kanban {kanban['nome']}",
+                )
+
+            ideia_atualizada = _fetch_idea_record(cur, ideia_id, usuario_id)
+            conn.commit()
+            if not ideia_atualizada:
+                raise HTTPException(status_code=404, detail="Ideia não encontrada")
+            return ideia_atualizada
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao vincular ideia ao projeto: {str(e)}")
+    finally:
+        conn.close()
+
 @app.get("/api/ideias", response_model=List[IdeiaResponse])
 def buscar_todas_ideias(user: dict = Depends(obter_usuario_assinante)):
     """Buscar todas as ideias do usuário autenticado"""
@@ -514,38 +1968,15 @@ def buscar_todas_ideias(user: dict = Depends(obter_usuario_assinante)):
             cur.execute("SELECT COUNT(*) as total FROM ideias")
             total_geral = cur.fetchone()["total"]
             print(f"📊 Total de ideias no banco: {total_geral}")
-            
-            # Buscar apenas ideias do usuário (garantir que usuario_id não é NULL)
-            cur.execute(
-                "SELECT id, titulo, tag, ideia, data, created_at, updated_at FROM ideias WHERE usuario_id = %s ORDER BY data DESC",
-                (usuario_id,)
-            )
-            ideias = cur.fetchall()
+
+            ideias = _fetch_ideas_for_user(cur, usuario_id)
             print(f"✅ Encontradas {len(ideias)} ideia(s) para usuario_id: {usuario_id} (email: {usuario_email})")
-            
-            # Log detalhado de cada ideia retornada
+
             for ideia in ideias:
                 print(f"   • ID {ideia['id']}: '{ideia['titulo']}' | Tag: '{ideia.get('tag', 'N/A')}'")
-            
-            # Converter para dict e garantir formato correto
-            resultado = []
-            for ideia in ideias:
-                ideia_dict = dict(ideia)
-                # Garantir que não retornamos ideias sem usuario_id (double-check)
-                # Converter datetime para string ISO
-                if 'data' in ideia_dict and ideia_dict['data']:
-                    if hasattr(ideia_dict['data'], 'isoformat'):
-                        ideia_dict['data'] = ideia_dict['data'].isoformat()
-                if 'created_at' in ideia_dict and ideia_dict['created_at']:
-                    if hasattr(ideia_dict['created_at'], 'isoformat'):
-                        ideia_dict['created_at'] = ideia_dict['created_at'].isoformat()
-                if 'updated_at' in ideia_dict and ideia_dict['updated_at']:
-                    if hasattr(ideia_dict['updated_at'], 'isoformat'):
-                        ideia_dict['updated_at'] = ideia_dict['updated_at'].isoformat()
-                resultado.append(ideia_dict)
-            
-            print(f"✅ Retornando {len(resultado)} ideia(s) para o frontend")
-            return resultado
+
+            print(f"✅ Retornando {len(ideias)} ideia(s) para o frontend")
+            return ideias
     except HTTPException:
         raise
     except Exception as e:
@@ -567,11 +1998,10 @@ def buscar_ideia_por_id(ideia_id: int, user: dict = Depends(obter_usuario_assina
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM ideias WHERE id = %s AND usuario_id = %s", (ideia_id, usuario_id))
-            ideia = cur.fetchone()
+            ideia = _fetch_idea_record(cur, ideia_id, usuario_id)
             if not ideia:
                 raise HTTPException(status_code=404, detail="Ideia não encontrada")
-            return dict(ideia)
+            return ideia
     except HTTPException:
         raise
     except Exception as e:
@@ -632,6 +2062,8 @@ async def criar_ideia(ideia: IdeiaCreate, request: Request, user: dict = Depends
                 print(f"⚠️  Erro ao gerar embedding (salvando sem embedding): {e}")
         
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            projeto_id = _validate_project_access(cur, ideia.projeto_id, usuario_id)
+
             # VALIDAÇÃO FINAL CRÍTICA: Garantir que usuario_id não é None antes do INSERT
             if usuario_id is None or usuario_id == "":
                 error_msg = f"ERRO CRÍTICO: usuario_id é None ou vazio antes do INSERT! user={user}"
@@ -664,13 +2096,21 @@ async def criar_ideia(ideia: IdeiaCreate, request: Request, user: dict = Depends
             
             if embedding_str:
                 cur.execute(
-                    "INSERT INTO ideias (titulo, tag, ideia, embedding, usuario_id) VALUES (%s, %s, %s, %s::vector, %s) RETURNING *",
-                    (ideia.titulo, ideia.tag, ideia.ideia, embedding_str, usuario_id)
+                    """
+                    INSERT INTO ideias (titulo, tag, ideia, embedding, usuario_id, projeto_id)
+                    VALUES (%s, %s, %s, %s::vector, %s, %s)
+                    RETURNING id
+                    """,
+                    (ideia.titulo, ideia.tag, ideia.ideia, embedding_str, usuario_id, projeto_id)
                 )
             else:
                 cur.execute(
-                    "INSERT INTO ideias (titulo, tag, ideia, usuario_id) VALUES (%s, %s, %s, %s) RETURNING *",
-                    (ideia.titulo, ideia.tag, ideia.ideia, usuario_id)
+                    """
+                    INSERT INTO ideias (titulo, tag, ideia, usuario_id, projeto_id)
+                    VALUES (%s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (ideia.titulo, ideia.tag, ideia.ideia, usuario_id, projeto_id)
                 )
             
             nova_ideia = cur.fetchone()
@@ -682,10 +2122,12 @@ async def criar_ideia(ideia: IdeiaCreate, request: Request, user: dict = Depends
                 raise ValueError(error_msg)
             
             # Verificar o que foi realmente salvo
-            usuario_id_salvo = nova_ideia.get('usuario_id') if nova_ideia else None
+            ideia_id = nova_ideia["id"]
+            ideia_completa = _fetch_idea_record(cur, ideia_id, usuario_id)
+            usuario_id_salvo = usuario_id
             print(f"   📊 Resultado do INSERT:")
-            print(f"      • ID: {nova_ideia['id']}")
-            print(f"      • Título: '{nova_ideia['titulo']}'")
+            print(f"      • ID: {ideia_id}")
+            print(f"      • Título: '{ideia.titulo}'")
             print(f"      • usuario_id SALVO: {usuario_id_salvo} (tipo: {type(usuario_id_salvo)})")
             
             if usuario_id_salvo is None:
@@ -698,9 +2140,9 @@ async def criar_ideia(ideia: IdeiaCreate, request: Request, user: dict = Depends
                 print(f"   ⚠️  ATENÇÃO: usuario_id esperado ({usuario_id}) diferente do salvo ({usuario_id_salvo})")
             
             conn.commit()
-            print(f"✅ Ideia criada com sucesso: ID {nova_ideia['id']}, usuario_id={usuario_id_salvo}")
+            print(f"✅ Ideia criada com sucesso: ID {ideia_id}, usuario_id={usuario_id_salvo}")
             print("=" * 80)
-            return dict(nova_ideia)
+            return ideia_completa
     except HTTPException:
         raise
     except Exception as e:
@@ -750,17 +2192,23 @@ def criar_ideia_com_embedding(dados: IdeiaComEmbedding, user: dict = Depends(obt
         print(f"   💾 Executando INSERT com usuario_id={usuario_id}")
         
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            projeto_id = _validate_project_access(cur, dados.ideia.projeto_id, usuario_id)
             cur.execute(
-                "INSERT INTO ideias (titulo, tag, ideia, embedding, usuario_id) VALUES (%s, %s, %s, %s::vector, %s) RETURNING *",
-                (dados.ideia.titulo, dados.ideia.tag, dados.ideia.ideia, embedding_str, usuario_id)
+                """
+                INSERT INTO ideias (titulo, tag, ideia, embedding, usuario_id, projeto_id)
+                VALUES (%s, %s, %s, %s::vector, %s, %s)
+                RETURNING id
+                """,
+                (dados.ideia.titulo, dados.ideia.tag, dados.ideia.ideia, embedding_str, usuario_id, projeto_id)
             )
             nova_ideia = cur.fetchone()
             
             # Verificar o que foi realmente salvo
-            usuario_id_salvo = nova_ideia.get('usuario_id') if nova_ideia else None
+            ideia_id = nova_ideia["id"] if nova_ideia else None
+            usuario_id_salvo = usuario_id
             print(f"   📊 Resultado do INSERT:")
-            print(f"      • ID: {nova_ideia['id'] if nova_ideia else 'N/A'}")
-            print(f"      • Título: '{nova_ideia['titulo'] if nova_ideia else 'N/A'}'")
+            print(f"      • ID: {ideia_id if nova_ideia else 'N/A'}")
+            print(f"      • Título: '{dados.ideia.titulo if nova_ideia else 'N/A'}'")
             print(f"      • usuario_id SALVO: {usuario_id_salvo}")
             
             if usuario_id_salvo is None:
@@ -771,10 +2219,11 @@ def criar_ideia_com_embedding(dados: IdeiaComEmbedding, user: dict = Depends(obt
             if usuario_id_salvo != usuario_id:
                 print(f"   ⚠️  ATENÇÃO: usuario_id esperado ({usuario_id}) diferente do salvo ({usuario_id_salvo})")
             
+            ideia_completa = _fetch_idea_record(cur, ideia_id, usuario_id)
             conn.commit()
-            print(f"✅ Ideia criada com embedding com sucesso: ID {nova_ideia['id']}, usuario_id={usuario_id_salvo}")
+            print(f"✅ Ideia criada com embedding com sucesso: ID {ideia_id}, usuario_id={usuario_id_salvo}")
             print("=" * 80)
-            return dict(nova_ideia)
+            return ideia_completa
     except HTTPException:
         raise
     except Exception as e:
@@ -808,6 +2257,12 @@ def atualizar_ideia(ideia_id: int, ideia: IdeiaUpdate, user: dict = Depends(obte
             titulo_final = ideia.titulo if ideia.titulo is not None else ideia_existente['titulo']
             tag_final = ideia.tag if ideia.tag is not None else ideia_existente['tag']
             ideia_final = ideia.ideia if ideia.ideia is not None else ideia_existente['ideia']
+            projeto_final = (
+                _validate_project_access(cur, ideia.projeto_id, usuario_id)
+                if ideia.projeto_id is not None
+                else ideia_existente.get('projeto_id')
+            )
+            clear_kanban = projeto_final != ideia_existente.get("projeto_id")
             
             # Regenerar embedding automaticamente se API Key estiver configurada
             embedding_str = None
@@ -824,23 +2279,335 @@ def atualizar_ideia(ideia_id: int, ideia: IdeiaUpdate, user: dict = Depends(obte
             # Atualizar ideia (verificar se pertence ao usuário)
             if embedding_str:
                 cur.execute(
-                    "UPDATE ideias SET titulo = %s, tag = %s, ideia = %s, embedding = %s::vector, updated_at = NOW() WHERE id = %s AND usuario_id = %s RETURNING *",
-                    (titulo_final, tag_final, ideia_final, embedding_str, ideia_id, usuario_id)
+                    """
+                    UPDATE ideias
+                    SET titulo = %s,
+                        tag = %s,
+                        ideia = %s,
+                        embedding = %s::vector,
+                        projeto_id = %s,
+                        kanban_id = CASE WHEN %s THEN NULL ELSE kanban_id END,
+                        kanban_ativo = CASE WHEN %s THEN FALSE ELSE kanban_ativo END,
+                        kanban_status = CASE WHEN %s THEN NULL ELSE kanban_status END,
+                        kanban_updated_at = CASE WHEN %s THEN NOW() ELSE kanban_updated_at END,
+                        updated_at = NOW()
+                    WHERE id = %s AND usuario_id = %s
+                    RETURNING id
+                    """,
+                    (
+                        titulo_final,
+                        tag_final,
+                        ideia_final,
+                        embedding_str,
+                        projeto_final,
+                        clear_kanban,
+                        clear_kanban,
+                        clear_kanban,
+                        clear_kanban,
+                        ideia_id,
+                        usuario_id,
+                    )
                 )
             else:
                 cur.execute(
-                    "UPDATE ideias SET titulo = %s, tag = %s, ideia = %s, updated_at = NOW() WHERE id = %s AND usuario_id = %s RETURNING *",
-                    (titulo_final, tag_final, ideia_final, ideia_id, usuario_id)
+                    """
+                    UPDATE ideias
+                    SET titulo = %s,
+                        tag = %s,
+                        ideia = %s,
+                        projeto_id = %s,
+                        kanban_id = CASE WHEN %s THEN NULL ELSE kanban_id END,
+                        kanban_ativo = CASE WHEN %s THEN FALSE ELSE kanban_ativo END,
+                        kanban_status = CASE WHEN %s THEN NULL ELSE kanban_status END,
+                        kanban_updated_at = CASE WHEN %s THEN NOW() ELSE kanban_updated_at END,
+                        updated_at = NOW()
+                    WHERE id = %s AND usuario_id = %s
+                    RETURNING id
+                    """,
+                    (
+                        titulo_final,
+                        tag_final,
+                        ideia_final,
+                        projeto_final,
+                        clear_kanban,
+                        clear_kanban,
+                        clear_kanban,
+                        clear_kanban,
+                        ideia_id,
+                        usuario_id,
+                    )
                 )
             
             ideia_atualizada = cur.fetchone()
+            ideia_completa = _fetch_idea_record(cur, ideia_id, usuario_id)
             conn.commit()
-            return dict(ideia_atualizada)
+            return ideia_completa
     except HTTPException:
         raise
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=500, detail=f"Erro ao atualizar ideia: {str(e)}")
+    finally:
+        conn.close()
+
+
+@app.patch("/api/ideias/{ideia_id}/kanban", response_model=IdeiaResponse)
+def atualizar_kanban_ideia(
+    ideia_id: int,
+    payload: KanbanStatusUpdate,
+    user: dict = Depends(obter_usuario_assinante),
+):
+    """Atualiza a coluna atual do Kanban e registra a data da movimentacao."""
+    if not user:
+        raise HTTPException(status_code=401, detail="Nao autenticado")
+
+    usuario_id = user["user_id"]
+    status_final = _validate_kanban_status(payload.kanban_status)
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, kanban_status, kanban_ativo
+                FROM ideias
+                WHERE id = %s AND usuario_id = %s
+                """,
+                (ideia_id, usuario_id),
+            )
+            ideia_existente = cur.fetchone()
+            if not ideia_existente:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Ideia nao encontrada ou voce nao tem permissao para move-la",
+                )
+
+            status_atual = (ideia_existente.get("kanban_status") or "").strip().lower() or None
+            if status_atual and status_atual not in KANBAN_STATUS_SET:
+                status_atual = None
+
+            cur.execute(
+                """
+                UPDATE ideias
+                SET kanban_ativo = TRUE,
+                    kanban_status = %s,
+                    kanban_updated_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = %s AND usuario_id = %s
+                RETURNING id
+                """,
+                (status_final, ideia_id, usuario_id),
+            )
+            ideia_atualizada = cur.fetchone()
+            if not ideia_atualizada:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Ideia nao encontrada ou voce nao tem permissao para move-la",
+                )
+            if status_atual != status_final or not ideia_existente.get("kanban_ativo"):
+                observacao = None
+                if not ideia_existente.get("kanban_ativo") and not status_atual:
+                    observacao = "Entrada inicial no Kanban"
+                _insert_kanban_history(
+                    cur,
+                    ideia_id=ideia_id,
+                    usuario_id=usuario_id,
+                    de_status=status_atual,
+                    para_status=status_final,
+                    observacao=observacao,
+                )
+
+            ideia_completa = _fetch_idea_record(cur, ideia_id, usuario_id)
+            conn.commit()
+            return ideia_completa
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao mover ideia no Kanban: {str(e)}")
+    finally:
+        conn.close()
+
+
+@app.post("/api/ideias/{ideia_id}/kanban/start", response_model=IdeiaResponse)
+def iniciar_ideia_no_kanban(
+    ideia_id: int,
+    payload: KanbanStartRequest,
+    user: dict = Depends(obter_usuario_assinante),
+):
+    """Ativa a ideia no Kanban a partir da coluna Novo."""
+    if not user:
+        raise HTTPException(status_code=401, detail="Nao autenticado")
+
+    usuario_id = user["user_id"]
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, projeto_id, kanban_id, kanban_status, kanban_ativo
+                FROM ideias
+                WHERE id = %s AND usuario_id = %s
+                """,
+                (ideia_id, usuario_id),
+            )
+            ideia_existente = cur.fetchone()
+            if not ideia_existente:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Ideia nao encontrada ou voce nao tem permissao para iniciar o Kanban",
+                )
+
+            projeto_id = ideia_existente.get("projeto_id")
+            if not projeto_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Vincule a ideia a um projeto antes de iniciar no Kanban",
+                )
+
+            kanban = _validate_kanban_access(cur, payload.kanban_id, usuario_id, projeto_id)
+            if not kanban:
+                raise HTTPException(status_code=400, detail="Kanban invalido")
+
+            status_atual = (ideia_existente.get("kanban_status") or "").strip().lower() or None
+            if status_atual and status_atual not in KANBAN_STATUS_SET:
+                status_atual = None
+            status_inicial = _validate_kanban_status(payload.kanban_status or status_atual or "novo")
+
+            cur.execute(
+                """
+                UPDATE ideias
+                SET kanban_id = %s,
+                    kanban_ativo = TRUE,
+                    kanban_status = %s,
+                    kanban_updated_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = %s AND usuario_id = %s
+                RETURNING id
+                """,
+                (kanban["id"], status_inicial, ideia_id, usuario_id),
+            )
+            ideia_atualizada = cur.fetchone()
+            if not ideia_atualizada:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Ideia nao encontrada ou voce nao tem permissao para iniciar o Kanban",
+                )
+            if (
+                not ideia_existente.get("kanban_ativo")
+                or status_atual != status_inicial
+                or ideia_existente.get("kanban_id") != kanban["id"]
+            ):
+                _insert_kanban_history(
+                    cur,
+                    ideia_id=ideia_id,
+                    usuario_id=usuario_id,
+                    de_status=None if not ideia_existente.get("kanban_ativo") else status_atual,
+                    para_status=status_inicial,
+                    observacao=f"Entrada inicial no Kanban {kanban['nome']}",
+                )
+
+            ideia_completa = _fetch_idea_record(cur, ideia_id, usuario_id)
+            conn.commit()
+            return ideia_completa
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao iniciar ideia no Kanban: {str(e)}")
+    finally:
+        conn.close()
+
+
+@app.get("/api/ideias/{ideia_id}/kanban/history", response_model=List[KanbanHistoryEntry])
+def buscar_historico_kanban_ideia(
+    ideia_id: int,
+    user: dict = Depends(obter_usuario_assinante),
+):
+    """Retorna o histÃ³rico de movimentaÃ§Ãµes do Kanban da ideia."""
+    if not user:
+        raise HTTPException(status_code=401, detail="NÃ£o autenticado")
+
+    usuario_id = user["user_id"]
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id
+                FROM ideias
+                WHERE id = %s AND usuario_id = %s
+                """,
+                (ideia_id, usuario_id),
+            )
+            if not cur.fetchone():
+                raise HTTPException(
+                    status_code=404,
+                    detail="Ideia nÃ£o encontrada ou vocÃª nÃ£o tem permissÃ£o para ver o histÃ³rico",
+                )
+
+            cur.execute(
+                """
+                SELECT id, ideia_id, usuario_id, de_status, para_status, observacao, moved_at
+                FROM ideias_kanban_historico
+                WHERE ideia_id = %s
+                ORDER BY moved_at DESC, id DESC
+                """,
+                (ideia_id,),
+            )
+            historico = cur.fetchall()
+            return [dict(item) for item in historico]
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao buscar histÃ³rico do Kanban: {str(e)}")
+    finally:
+        conn.close()
+
+
+@app.patch("/api/ideias/{ideia_id}/agenda", response_model=IdeiaResponse)
+def atualizar_agenda_ideia(
+    ideia_id: int,
+    payload: AgendaUpdate,
+    user: dict = Depends(obter_usuario_assinante),
+):
+    """Define ou remove a data planejada da ideia na agenda."""
+    if not user:
+        raise HTTPException(status_code=401, detail="NÃ£o autenticado")
+
+    usuario_id = user["user_id"]
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                UPDATE ideias
+                SET agenda_data = %s,
+                    agenda_observacao = %s,
+                    updated_at = NOW()
+                WHERE id = %s AND usuario_id = %s
+                RETURNING id
+                """,
+                (
+                    payload.agenda_data,
+                    payload.agenda_observacao.strip() if payload.agenda_observacao else None,
+                    ideia_id,
+                    usuario_id,
+                ),
+            )
+            ideia_atualizada = cur.fetchone()
+            if not ideia_atualizada:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Ideia nÃ£o encontrada ou vocÃª nÃ£o tem permissÃ£o para alterar a agenda",
+                )
+            ideia_completa = _fetch_idea_record(cur, ideia_id, usuario_id)
+            conn.commit()
+            return ideia_completa
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao atualizar agenda da ideia: {str(e)}")
     finally:
         conn.close()
 

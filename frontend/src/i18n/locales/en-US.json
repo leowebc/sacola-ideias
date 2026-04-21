@@ -4,6 +4,8 @@
     "subtitle": "Intelligent Notes System",
     "cadastrar": "Register",
     "buscar": "Search",
+    "kanban": "Kanban",
+    "agenda": "Schedule",
     "limpar": "Clear localStorage?",
     "limparDesc": "Clear old localStorage data? (API key will be preserved)",
     "limparSuccess": "LocalStorage cleared!",
@@ -133,4 +135,3 @@
     "idioma": "Language"
   }
 }
-

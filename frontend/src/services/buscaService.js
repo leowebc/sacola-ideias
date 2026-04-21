@@ -1,8 +1,11 @@
 import { 
   buscarTodasIdeias, 
-  salvarIdeia as salvarIdeiaDB,
   buscarPorSimilaridade as buscarPorSimilaridadeDB 
 } from './dbService'
+
+const API_BASE_URL = (typeof window !== 'undefined' && window.API_URL)
+  ? window.API_URL
+  : (import.meta.env.VITE_API_URL || 'http://localhost:8002/api')
 
 // Buscar ideias por similaridade (backend gera embedding automaticamente)
 export async function buscarPorSimilaridade(termoBusca, _apiKey = null, options = {}) {
@@ -51,7 +54,29 @@ export async function buscarPorSimilaridade(termoBusca, _apiKey = null, options 
 
 // Salvar ideia (backend gera embedding automaticamente)
 export async function salvarIdeiaComEmbedding(ideia, _apiKey = null) {
-  // Backend gera embedding automaticamente, apenas enviar a ideia
-  return await salvarIdeiaDB(ideia)
+  const token = localStorage.getItem('auth_token')
+  const response = await fetch(`${API_BASE_URL}/ideias`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({
+      titulo: ideia.titulo,
+      tag: ideia.tag || null,
+      ideia: ideia.ideia,
+      projeto_id: ideia.projeto_id ?? null,
+    }),
+  })
+
+  const contentType = response.headers.get('content-type') || ''
+  const isJson = contentType.includes('application/json')
+  const data = isJson ? await response.json().catch(() => ({})) : {}
+
+  if (!response.ok) {
+    throw new Error(data?.detail || `Erro ao salvar ideia (${response.status})`)
+  }
+
+  return data
 }
 
