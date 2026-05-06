@@ -6,6 +6,8 @@ import {
   excluirEspaco as excluirEspacoAPI,
   criarProjeto as criarProjetoAPI,
   criarKanban as criarKanbanAPI,
+  renomearKanban as renomearKanbanAPI,
+  excluirKanban as excluirKanbanAPI,
   renomearEspaco as renomearEspacoAPI,
   vincularIdeiaAoProjeto as vincularIdeiaAoProjetoAPI,
 } from '../services/workspaceService'
@@ -159,6 +161,38 @@ export function WorkspaceProvider({ children }) {
     }
   }
 
+  async function renomearKanban(kanbanId, payload) {
+    setSavingWorkspace(true)
+    try {
+      const kanban = await renomearKanbanAPI(kanbanId, payload)
+      await carregarWorkspace()
+      showSuccessToast('Kanban atualizado com sucesso!')
+      return kanban
+    } catch (error) {
+      console.error('Erro ao editar kanban:', error)
+      showErrorToast(error.message || 'Nao foi possivel editar o kanban.')
+      throw error
+    } finally {
+      setSavingWorkspace(false)
+    }
+  }
+
+  async function excluirKanban(kanbanId) {
+    setSavingWorkspace(true)
+    try {
+      const response = await excluirKanbanAPI(kanbanId)
+      await carregarWorkspace()
+      showSuccessToast('Kanban excluido com sucesso!')
+      return response
+    } catch (error) {
+      console.error('Erro ao excluir kanban:', error)
+      showErrorToast(error.message || 'Nao foi possivel excluir o kanban.')
+      throw error
+    } finally {
+      setSavingWorkspace(false)
+    }
+  }
+
   async function renomearEspaco(espacoId, payload) {
     setSavingWorkspace(true)
     try {
@@ -221,6 +255,8 @@ export function WorkspaceProvider({ children }) {
       excluirEspaco,
       criarProjeto,
       criarKanban,
+      renomearKanban,
+      excluirKanban,
       vincularIdeiaAoProjeto,
     }),
     [

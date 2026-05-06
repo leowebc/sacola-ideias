@@ -1,17 +1,22 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
+import KanbanActionsMenu from '../components/KanbanActionsMenu'
+import KanbanCardModal from '../components/KanbanCardModal'
+import KanbanEditModal from '../components/KanbanEditModal'
+import KanbanItemMenu from '../components/KanbanItemMenu'
 import IdeiaModal from '../components/IdeiaModal'
 import { useWorkspace } from '../context/WorkspaceContext'
 import { atualizarAgendaIdeia } from '../services/agendaService'
-import { buscarTodasIdeias } from '../services/dbService'
+import { buscarTodasIdeias, deletarIdeia } from '../services/dbService'
 import {
   atualizarCardKanban,
   atualizarKanbanStatus,
   buscarCardsKanban,
   buscarHistoricoKanban,
   criarCardKanban,
+  deletarCardKanban,
 } from '../services/kanbanService'
-import { showErrorToast, showSuccessToast } from '../utils/alerts'
+import { showDeleteConfirm, showErrorToast, showSuccessToast } from '../utils/alerts'
 
 const KANBAN_COLUMNS = [
   { id: 'novo', label: 'Novo', accent: 'from-slate-500 to-slate-700' },
@@ -53,14 +58,24 @@ function ordenarItensKanban(items) {
   })
 }
 
+function getChecklistProgress(kanban) {
+  const checklist = Array.isArray(kanban?.checklist) ? kanban.checklist : []
+  const concluido = checklist.filter((item) => item.concluido).length
+  return { total: checklist.length, concluido }
+}
+
 function KanbanBoard() {
   const navigate = useNavigate()
+  const location = useLocation()
   const { kanbanId } = useParams()
   const {
     kanbanOptions,
     loadingWorkspace,
+    savingWorkspace,
     selecionarProjeto,
     carregarWorkspace,
+    renomearKanban,
+    excluirKanban,
   } = useWorkspace()
 
   const [ideias, setIdeias] = useState([])
@@ -69,6 +84,7 @@ function KanbanBoard() {
   const [draggedItemKey, setDraggedItemKey] = useState(null)
   const [dragOverColumn, setDragOverColumn] = useState(null)
   const [ideiaSelecionada, setIdeiaSelecionada] = useState(null)
+  const [acaoModalInicial, setAcaoModalInicial] = useState(null)
   const [mostrarModal, setMostrarModal] = useState(false)
   const [kanbanHistory, setKanbanHistory] = useState([])
   const [loadingKanbanHistory, setLoadingKanbanHistory] = useState(false)
@@ -76,6 +92,9 @@ function KanbanBoard() {
   const [addingColumnId, setAddingColumnId] = useState(null)
   const [novoCardTitulo, setNovoCardTitulo] = useState('')
   const [salvandoCardColumnId, setSalvandoCardColumnId] = useState(null)
+  const [cardEmEdicao, setCardEmEdicao] = useState(null)
+  const [salvandoEdicaoCard, setSalvandoEdicaoCard] = useState(false)
+  const [kanbanEmEdicao, setKanbanEmEdicao] = useState(null)
 
   useEffect(() => {
     carregarQuadro()
@@ -99,6 +118,15 @@ function KanbanBoard() {
       selecionarProjeto(kanbanAtual.projeto_id)
     }
   }, [kanbanAtual, selecionarProjeto])
+
+  useEffect(() => {
+    if (!kanbanAtual || !location.state?.openKanbanConfig) {
+      return
+    }
+
+    setKanbanEmEdicao(kanbanAtual)
+    navigate(`/app/kanban/${kanbanAtual.id}`, { replace: true })
+  }, [kanbanAtual, location.state, navigate])
 
   const sugestoes = useMemo(() => {
     const titulos = [...new Set(ideias.map((ideia) => ideia.titulo).filter(Boolean))]
@@ -170,8 +198,9 @@ function KanbanBoard() {
     }
   }
 
-  function abrirIdeia(ideia) {
+  function abrirIdeia(ideia, acaoInicial = null) {
     setIdeiaSelecionada(ideia)
+    setAcaoModalInicial(acaoInicial)
     setMostrarModal(true)
     setKanbanHistory([])
     carregarHistoricoKanban(ideia.id)
@@ -180,6 +209,7 @@ function KanbanBoard() {
   function fecharModal() {
     setMostrarModal(false)
     setIdeiaSelecionada(null)
+    setAcaoModalInicial(null)
     setKanbanHistory([])
   }
 
@@ -206,6 +236,109 @@ function KanbanBoard() {
     ))
 
     carregarWorkspace()
+  }
+
+  function abrirEdicaoCard(item) {
+    setCardEmEdicao(item)
+  }
+
+  function fecharEdicaoCard() {
+    setCardEmEdicao(null)
+    setSalvandoEdicaoCard(false)
+  }
+
+  async function handleSalvarEdicaoCard(payload) {
+    if (!cardEmEdicao?.id || !payload?.titulo?.trim()) {
+      return
+    }
+
+    setSalvandoEdicaoCard(true)
+    try {
+      const cardAtualizado = await atualizarCardKanban(cardEmEdicao.id, payload)
+
+      setCardsKanban((estadoAtual) =>
+        estadoAtual.map((card) =>
+          card.id === cardEmEdicao.id
+            ? {
+                ...card,
+                ...cardAtualizado,
+                kanban_status: normalizeKanbanStatus(cardAtualizado.kanban_status),
+              }
+            : card,
+        ),
+      )
+
+      fecharEdicaoCard()
+      showSuccessToast('Card do kanban atualizado com sucesso!')
+    } catch (error) {
+      console.error('Erro ao editar card do kanban:', error)
+      showErrorToast(error.message || 'Nao foi possivel editar o card do kanban.')
+      setSalvandoEdicaoCard(false)
+    }
+  }
+
+  async function handleExcluirIdeia(item) {
+    const result = await showDeleteConfirm(item.titulo || 'ideia')
+    if (!result.isConfirmed) {
+      return
+    }
+
+    try {
+      await deletarIdeia(item.id)
+
+      setIdeias((estadoAtual) => estadoAtual.filter((ideia) => ideia.id !== item.id))
+
+      if (ideiaSelecionada?.id === item.id) {
+        fecharModal()
+      }
+
+      await carregarWorkspace()
+      showSuccessToast('Ideia excluida com sucesso!')
+    } catch (error) {
+      console.error('Erro ao excluir ideia do kanban:', error)
+      showErrorToast(error.message || 'Nao foi possivel excluir a ideia.')
+    }
+  }
+
+  async function handleExcluirCard(item) {
+    const result = await showDeleteConfirm(item.titulo || 'card')
+    if (!result.isConfirmed) {
+      return
+    }
+
+    try {
+      await deletarCardKanban(item.id)
+      setCardsKanban((estadoAtual) => estadoAtual.filter((card) => card.id !== item.id))
+      await carregarWorkspace()
+      showSuccessToast('Card do kanban excluido com sucesso!')
+    } catch (error) {
+      console.error('Erro ao excluir card do kanban:', error)
+      showErrorToast(error.message || 'Nao foi possivel excluir o card do kanban.')
+    }
+  }
+
+  async function handleSalvarEdicaoKanban(payload) {
+    if (!kanbanEmEdicao?.id || !payload?.nome) {
+      return
+    }
+
+    await renomearKanban(kanbanEmEdicao.id, payload)
+    setKanbanEmEdicao(null)
+  }
+
+  async function handleExcluirKanban(kanban) {
+    const result = await showDeleteConfirm(kanban.nome, {
+      title: 'Excluir kanban?',
+      html: `Deseja excluir o kanban <strong>"${kanban.nome}"</strong>?<br><br>Os cards nativos serao removidos e as ideias vinculadas sairao deste quadro.`,
+      confirmButtonText: 'Sim, excluir kanban!',
+    })
+
+    if (!result.isConfirmed) {
+      return
+    }
+
+    await excluirKanban(kanban.id)
+    navigate('/app/kanban')
   }
 
   async function handleScheduleIdea(ideia, payload) {
@@ -393,9 +526,12 @@ function KanbanBoard() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-indigo-50 p-4 md:p-6">
       <div className="mx-auto max-w-[1800px] space-y-6">
-        <div className="rounded-2xl border border-white/70 bg-white/80 p-6 shadow-sm backdrop-blur">
+        <div
+          className="rounded-2xl border border-white/70 bg-white/80 p-6 shadow-sm backdrop-blur"
+          style={kanbanAtual.cor ? { boxShadow: `inset 0 4px 0 0 ${kanbanAtual.cor}` } : undefined}
+        >
           <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-            <div>
+            <div className="min-w-0">
               <button
                 type="button"
                 onClick={() => navigate('/app/kanban')}
@@ -403,16 +539,47 @@ function KanbanBoard() {
               >
                 Voltar para kanbans
               </button>
-              <p className="mt-4 text-sm font-semibold uppercase tracking-[0.2em] text-indigo-500">
-                Quadro
-              </p>
-              <h1 className="text-3xl font-bold text-slate-900">{kanbanAtual.nome}</h1>
-              <p className="mt-2 text-slate-600">
-                {kanbanAtual.espaco_nome} / {kanbanAtual.projeto_nome}
-              </p>
-              <p className="mt-1 text-sm text-slate-500">
-                Ideias vinculadas entram em Novo. Cards criados aqui ficam salvos no proprio kanban.
-              </p>
+              <div
+                className="mt-4 cursor-pointer"
+                onClick={() => setKanbanEmEdicao(kanbanAtual)}
+              >
+                <p className="text-sm font-semibold uppercase tracking-[0.2em] text-indigo-500">
+                  Quadro
+                </p>
+                <div className="mt-1 flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-3">
+                      <span
+                        className="h-3 w-3 rounded-full border border-white/70 shadow-sm"
+                        style={{ backgroundColor: kanbanAtual.cor || '#6366F1' }}
+                      />
+                      <h1 className="truncate text-3xl font-bold text-slate-900">{kanbanAtual.nome}</h1>
+                    </div>
+                  </div>
+
+                  <KanbanActionsMenu
+                    kanban={kanbanAtual}
+                    onEdit={() => setKanbanEmEdicao(kanbanAtual)}
+                    onDelete={() => handleExcluirKanban(kanbanAtual)}
+                  />
+                </div>
+                <p className="mt-2 text-slate-600">
+                  {kanbanAtual.espaco_nome} / {kanbanAtual.projeto_nome}
+                </p>
+                {kanbanAtual.descricao ? (
+                  <p className="mt-3 max-w-3xl whitespace-pre-wrap text-sm text-slate-500">
+                    {kanbanAtual.descricao}
+                  </p>
+                ) : null}
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
+                    {getChecklistProgress(kanbanAtual).concluido}/{getChecklistProgress(kanbanAtual).total} checklist
+                  </span>
+                </div>
+                <p className="mt-1 text-sm text-slate-500">
+                  Ideias vinculadas entram em Novo. Cards criados aqui ficam salvos no proprio kanban.
+                </p>
+              </div>
             </div>
 
             <button
@@ -420,6 +587,13 @@ function KanbanBoard() {
               className="rounded-xl border border-slate-200 px-4 py-2 text-slate-700 transition-colors hover:bg-slate-50"
             >
               Atualizar quadro
+            </button>
+            <button
+              type="button"
+              onClick={() => setKanbanEmEdicao(kanbanAtual)}
+              className="rounded-xl bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-700"
+            >
+              Configurar quadro
             </button>
           </div>
         </div>
@@ -544,19 +718,43 @@ function KanbanBoard() {
                           onClick={() => {
                             if (item.item_type === 'ideia') {
                               abrirIdeia(item)
+                              return
                             }
+
+                            abrirEdicaoCard(item)
                           }}
                           className={`rounded-2xl border border-slate-200 bg-white p-4 shadow-sm transition-all hover:shadow-md ${
-                            item.item_type === 'ideia' ? 'cursor-pointer' : 'cursor-default'
+                            'cursor-pointer'
                           } ${
                             draggedItemKey === item.board_key ? 'rotate-1 scale-[0.98] opacity-60' : ''
                           }`}
                         >
                           <div className="flex items-start justify-between gap-3">
                             <h3 className="leading-snug font-semibold text-slate-900">{item.titulo}</h3>
-                            <span className="text-[11px] uppercase tracking-wide text-slate-400">
-                              {item.display_id}
-                            </span>
+                            <div className="flex items-start gap-2">
+                              <span className="pt-1 text-[11px] uppercase tracking-wide text-slate-400">
+                                {item.display_id}
+                              </span>
+                              <KanbanItemMenu
+                                item={item}
+                                onEdit={(currentItem) => {
+                                  if (currentItem.item_type === 'ideia') {
+                                    abrirIdeia(currentItem, 'edit')
+                                    return
+                                  }
+
+                                  abrirEdicaoCard(currentItem)
+                                }}
+                                onDelete={(currentItem) => {
+                                  if (currentItem.item_type === 'ideia') {
+                                    handleExcluirIdeia(currentItem)
+                                    return
+                                  }
+
+                                  handleExcluirCard(currentItem)
+                                }}
+                              />
+                            </div>
                           </div>
 
                           {item.item_type === 'ideia' && item.tag ? (
@@ -566,18 +764,26 @@ function KanbanBoard() {
                           ) : null}
 
                           {item.item_type === 'card' ? (
-                            <span className="mt-3 inline-flex items-center rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700">
-                              Card do kanban
-                            </span>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              <span className="inline-flex items-center rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700">
+                                Card do kanban
+                              </span>
+                              {item.prazo_entrega ? (
+                                <span className="inline-flex items-center rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700">
+                                  Prazo: {new Date(item.prazo_entrega).toLocaleDateString('pt-BR')}
+                                </span>
+                              ) : null}
+                              {(item.checklist || []).length > 0 ? (
+                                <span className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700">
+                                  {(item.checklist || []).filter((check) => check.concluido).length}/{(item.checklist || []).length} checklist
+                                </span>
+                              ) : null}
+                            </div>
                           ) : null}
-
-                          <p className="mt-3 line-clamp-4 whitespace-pre-wrap text-sm text-slate-600">
-                            {item.conteudo || 'Card criado direto no quadro.'}
-                          </p>
 
                           <div className="mt-4 flex items-center justify-between gap-3 border-t border-slate-100 pt-4 text-xs">
                             <span className="font-medium text-indigo-600">
-                              {item.item_type === 'ideia' ? 'Clique para ver detalhes' : 'Card nativo do kanban'}
+                              {item.item_type === 'ideia' ? 'Clique para ver detalhes' : 'Clique para editar o card'}
                             </span>
                             <span className="text-slate-400">
                               Arraste para mover
@@ -606,6 +812,25 @@ function KanbanBoard() {
         showKanbanDetails
         titulosSugeridos={sugestoes.titulos}
         tagsSugeridas={sugestoes.tags}
+        initialAction={acaoModalInicial}
+      />
+
+      {cardEmEdicao ? (
+        <KanbanCardModal
+          isOpen={Boolean(cardEmEdicao)}
+          card={cardEmEdicao}
+          saving={salvandoEdicaoCard}
+          onClose={fecharEdicaoCard}
+          onSave={handleSalvarEdicaoCard}
+        />
+      ) : null}
+
+      <KanbanEditModal
+        isOpen={Boolean(kanbanEmEdicao)}
+        kanban={kanbanEmEdicao}
+        saving={savingWorkspace}
+        onClose={() => setKanbanEmEdicao(null)}
+        onSave={handleSalvarEdicaoKanban}
       />
     </div>
   )

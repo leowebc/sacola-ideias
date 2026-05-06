@@ -86,6 +86,25 @@ export async function criarKanban(payload) {
   return parseResponse(response, 'Nao foi possivel criar o kanban.')
 }
 
+export async function renomearKanban(kanbanId, payload) {
+  const response = await fetch(`${API_BASE_URL}/kanbans/${kanbanId}`, {
+    method: 'PATCH',
+    headers: buildAuthHeaders(),
+    body: JSON.stringify(payload),
+  })
+
+  return parseResponse(response, 'Nao foi possivel editar o kanban.')
+}
+
+export async function excluirKanban(kanbanId) {
+  const response = await fetch(`${API_BASE_URL}/kanbans/${kanbanId}`, {
+    method: 'DELETE',
+    headers: buildAuthHeaders(),
+  })
+
+  return parseResponse(response, 'Nao foi possivel excluir o kanban.')
+}
+
 export async function vincularIdeiaAoProjeto(ideiaId, projetoId, kanbanId = null) {
   const response = await fetch(`${API_BASE_URL}/ideias/${ideiaId}/projeto`, {
     method: 'PATCH',

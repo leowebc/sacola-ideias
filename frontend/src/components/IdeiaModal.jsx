@@ -83,11 +83,11 @@ function IdeiaModal({
       setAgendaObservacao(ideia.agenda_observacao || '')
       setProjetoId(ideia.projeto_id ? String(ideia.projeto_id) : '')
       setKanbanId(ideia.kanban_id ? String(ideia.kanban_id) : '')
-      setEditando(false)
+      setEditando(initialAction === 'edit')
       setShowActionsMenu(false)
       setAcaoAtiva(
         compactActions
-          ? (initialAction === 'kanban' ? 'project' : initialAction)
+          ? (initialAction === 'kanban' ? 'project' : (initialAction === 'edit' ? null : initialAction))
           : null,
       )
     }
@@ -95,7 +95,7 @@ function IdeiaModal({
     return () => {
       document.body.style.overflow = 'unset'
     }
-  }, [compactActions, ideia, initialAction, isOpen])
+  }, [compactActions, ideia?.id, initialAction, isOpen])
 
   const projetoSelecionado = useMemo(
     () => projectOptions.find((option) => String(option.id) === String(projetoId || '')) || null,

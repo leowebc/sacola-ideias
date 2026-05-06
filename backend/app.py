@@ -9,6 +9,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
@@ -470,6 +471,52 @@ def _normalize_workspace_name(value: str, entity_label: str) -> str:
         raise HTTPException(status_code=400, detail=f"Nome de {entity_label} deve ter no máximo 160 caracteres")
     return normalized
 
+
+def _normalize_optional_text(value: Optional[str], max_length: int = 4000) -> Optional[str]:
+    if value is None:
+        return None
+
+    normalized = value.strip()
+    if not normalized:
+        return None
+    if len(normalized) > max_length:
+        raise HTTPException(status_code=400, detail=f"Texto deve ter no máximo {max_length} caracteres")
+    return normalized
+
+
+def _normalize_hex_color(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+
+    normalized = value.strip().upper()
+    if not normalized:
+        return None
+
+    if not re.fullmatch(r"#[0-9A-F]{6}", normalized):
+        raise HTTPException(status_code=400, detail="Cor inválida. Use o formato hexadecimal, por exemplo: #6366F1")
+    return normalized
+
+
+def _normalize_kanban_checklist(items: Optional[List["KanbanChecklistItem"]]) -> List[dict]:
+    if not items:
+        return []
+
+    normalized_items = []
+    for item in items:
+        titulo = _normalize_optional_text(item.titulo, 200)
+        if not titulo:
+            raise HTTPException(status_code=400, detail="Cada item do checklist precisa ter um título")
+
+        normalized_items.append(
+            {
+                "id": (item.id or f"check-{uuid4().hex[:12]}").strip(),
+                "titulo": titulo,
+                "concluido": bool(item.concluido),
+            }
+        )
+
+    return normalized_items
+
 def ensure_workspace_schema():
     """Garante as tabelas de espacos, projetos, kanbans e os vinculos das ideias."""
     conn = None
@@ -522,9 +569,23 @@ def ensure_workspace_schema():
                     usuario_id BIGINT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
                     nome VARCHAR(160) NOT NULL,
                     descricao TEXT,
+                    cor VARCHAR(20),
+                    checklist JSONB NOT NULL DEFAULT '[]'::jsonb,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE kanbans
+                ADD COLUMN IF NOT EXISTS cor VARCHAR(20)
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE kanbans
+                ADD COLUMN IF NOT EXISTS checklist JSONB NOT NULL DEFAULT '[]'::jsonb
                 """
             )
             cur.execute(
@@ -536,10 +597,24 @@ def ensure_workspace_schema():
                     usuario_id BIGINT NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
                     titulo VARCHAR(200) NOT NULL,
                     descricao TEXT,
+                    checklist JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    prazo_entrega TIMESTAMPTZ,
                     kanban_status VARCHAR(30) NOT NULL DEFAULT 'novo',
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE kanban_cards
+                ADD COLUMN IF NOT EXISTS checklist JSONB NOT NULL DEFAULT '[]'::jsonb
+                """
+            )
+            cur.execute(
+                """
+                ALTER TABLE kanban_cards
+                ADD COLUMN IF NOT EXISTS prazo_entrega TIMESTAMPTZ
                 """
             )
             cur.execute(
@@ -694,11 +769,15 @@ IDEIA_SELECT_FIELDS = """
 def _serialize_kanban_record(record: dict) -> dict:
     serialized = _serialize_datetime_fields(dict(record), ["created_at", "updated_at"])
     serialized["cards_count"] = int(record.get("cards_count") or 0)
+    serialized["cor"] = record.get("cor") or None
+    serialized["checklist"] = record.get("checklist") or []
     return serialized
 
 
 def _serialize_kanban_card_record(record: dict) -> dict:
-    return _serialize_datetime_fields(dict(record), ["created_at", "updated_at"])
+    serialized = _serialize_datetime_fields(dict(record), ["created_at", "updated_at", "prazo_entrega"])
+    serialized["checklist"] = record.get("checklist") or []
+    return serialized
 
 
 def _fetch_workspace_projects(cur, usuario_id: int, espaco_id: Optional[int] = None) -> List[dict]:
@@ -775,6 +854,8 @@ def _fetch_project_kanbans(cur, usuario_id: int) -> dict:
             k.projeto_id,
             k.nome,
             k.descricao,
+            k.cor,
+            k.checklist,
             k.created_at,
             k.updated_at,
             COALESCE(ideias_stats.cards_count, 0) + COALESCE(cards_stats.cards_count, 0) AS cards_count
@@ -902,6 +983,8 @@ def _fetch_kanban_card_record(cur, card_id: int, usuario_id: int) -> Optional[di
             kc.projeto_id,
             kc.titulo,
             kc.descricao,
+            kc.checklist,
+            kc.prazo_entrega,
             kc.kanban_status,
             kc.created_at,
             kc.updated_at
@@ -923,6 +1006,8 @@ def _fetch_kanban_cards_for_kanban(cur, kanban_id: int, usuario_id: int) -> List
             kc.projeto_id,
             kc.titulo,
             kc.descricao,
+            kc.checklist,
+            kc.prazo_entrega,
             kc.kanban_status,
             kc.created_at,
             kc.updated_at
@@ -1182,10 +1267,25 @@ class ProjetoVinculoUpdate(BaseModel):
     kanban_id: Optional[int] = None
 
 
+class KanbanChecklistItem(BaseModel):
+    id: Optional[str] = None
+    titulo: str
+    concluido: bool = False
+
+
 class KanbanCreate(BaseModel):
     projeto_id: int
     nome: str
     descricao: Optional[str] = None
+    cor: Optional[str] = None
+    checklist: List[KanbanChecklistItem] = Field(default_factory=list)
+
+
+class KanbanUpdate(BaseModel):
+    nome: Optional[str] = None
+    descricao: Optional[str] = None
+    cor: Optional[str] = None
+    checklist: Optional[List[KanbanChecklistItem]] = None
 
 
 class KanbanWorkspaceResponse(BaseModel):
@@ -1193,6 +1293,8 @@ class KanbanWorkspaceResponse(BaseModel):
     projeto_id: int
     nome: str
     descricao: Optional[str] = None
+    cor: Optional[str] = None
+    checklist: List[KanbanChecklistItem] = Field(default_factory=list)
     cards_count: int = 0
     created_at: datetime
     updated_at: datetime
@@ -1233,12 +1335,16 @@ class KanbanHistoryEntry(BaseModel):
 class KanbanCardCreate(BaseModel):
     titulo: str
     descricao: Optional[str] = None
+    checklist: List[KanbanChecklistItem] = Field(default_factory=list)
+    prazo_entrega: Optional[datetime] = None
     kanban_status: Optional[str] = "novo"
 
 
 class KanbanCardUpdate(BaseModel):
     titulo: Optional[str] = None
     descricao: Optional[str] = None
+    checklist: Optional[List[KanbanChecklistItem]] = None
+    prazo_entrega: Optional[datetime] = None
     kanban_status: Optional[str] = None
 
 
@@ -1248,6 +1354,8 @@ class KanbanCardResponse(BaseModel):
     projeto_id: int
     titulo: str
     descricao: Optional[str] = None
+    checklist: List[KanbanChecklistItem] = Field(default_factory=list)
+    prazo_entrega: Optional[datetime] = None
     kanban_status: str
     created_at: datetime
     updated_at: datetime
@@ -1649,7 +1757,7 @@ def criar_projeto(payload: ProjetoCreate, user: dict = Depends(obter_usuario_atu
                 """
                 INSERT INTO kanbans (projeto_id, usuario_id, nome, descricao)
                 VALUES (%s, %s, %s, %s)
-                RETURNING id, projeto_id, nome, descricao, created_at, updated_at
+                RETURNING id, projeto_id, nome, descricao, cor, checklist, created_at, updated_at
                 """,
                 (
                     projeto["id"],
@@ -1692,15 +1800,17 @@ def criar_kanban(payload: KanbanCreate, user: dict = Depends(obter_usuario_atual
 
             cur.execute(
                 """
-                INSERT INTO kanbans (projeto_id, usuario_id, nome, descricao)
-                VALUES (%s, %s, %s, %s)
-                RETURNING id, projeto_id, nome, descricao, created_at, updated_at
+                INSERT INTO kanbans (projeto_id, usuario_id, nome, descricao, cor, checklist)
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                RETURNING id, projeto_id, nome, descricao, cor, checklist, created_at, updated_at
                 """,
                 (
                     projeto_id,
                     usuario_id,
                     nome,
-                    payload.descricao.strip() if payload.descricao else None,
+                    _normalize_optional_text(payload.descricao),
+                    _normalize_hex_color(payload.cor),
+                    psycopg2.extras.Json(_normalize_kanban_checklist(payload.checklist)),
                 ),
             )
             kanban = cur.fetchone()
@@ -1714,6 +1824,148 @@ def criar_kanban(payload: KanbanCreate, user: dict = Depends(obter_usuario_atual
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=500, detail=f"Erro ao criar kanban: {str(e)}")
+    finally:
+        conn.close()
+
+
+@app.patch("/api/kanbans/{kanban_id}", response_model=KanbanWorkspaceResponse)
+def atualizar_kanban(
+    kanban_id: int,
+    payload: KanbanUpdate,
+    user: dict = Depends(obter_usuario_atual),
+):
+    usuario_id = user["user_id"]
+    payload_fields = getattr(payload, "model_fields_set", None) or getattr(payload, "__fields_set__", set())
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            kanban_atual = _validate_kanban_access(cur, kanban_id, usuario_id)
+            if not kanban_atual:
+                raise HTTPException(status_code=404, detail="Kanban nao encontrado")
+
+            cur.execute(
+                """
+                SELECT id, projeto_id, nome, descricao, cor, checklist
+                FROM kanbans
+                WHERE id = %s AND usuario_id = %s
+                """,
+                (kanban_id, usuario_id),
+            )
+            kanban_completo = cur.fetchone()
+            if not kanban_completo:
+                raise HTTPException(status_code=404, detail="Kanban nao encontrado")
+
+            nome = (
+                _normalize_workspace_name(payload.nome, "kanban")
+                if "nome" in payload_fields
+                else kanban_completo["nome"]
+            )
+            descricao = (
+                _normalize_optional_text(payload.descricao)
+                if "descricao" in payload_fields
+                else kanban_completo.get("descricao")
+            )
+            cor = (
+                _normalize_hex_color(payload.cor)
+                if "cor" in payload_fields
+                else kanban_completo.get("cor")
+            )
+            checklist = (
+                _normalize_kanban_checklist(payload.checklist)
+                if "checklist" in payload_fields
+                else (kanban_completo.get("checklist") or [])
+            )
+
+            cur.execute(
+                """
+                UPDATE kanbans
+                SET nome = %s,
+                    descricao = %s,
+                    cor = %s,
+                    checklist = %s::jsonb,
+                    updated_at = NOW()
+                WHERE id = %s AND usuario_id = %s
+                RETURNING id, projeto_id, nome, descricao, cor, checklist, created_at, updated_at
+                """,
+                (
+                    nome,
+                    descricao,
+                    cor,
+                    psycopg2.extras.Json(checklist),
+                    kanban_id,
+                    usuario_id,
+                ),
+            )
+            kanban = cur.fetchone()
+            if not kanban:
+                raise HTTPException(status_code=404, detail="Kanban nao encontrado")
+
+            conn.commit()
+            return _serialize_kanban_record(kanban)
+    except psycopg2.errors.UniqueViolation:
+        conn.rollback()
+        raise HTTPException(status_code=409, detail="Ja existe um kanban com esse nome neste projeto")
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao atualizar kanban: {str(e)}")
+    finally:
+        conn.close()
+
+
+@app.delete("/api/kanbans/{kanban_id}")
+def excluir_kanban(kanban_id: int, user: dict = Depends(obter_usuario_atual)):
+    usuario_id = user["user_id"]
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            kanban = _validate_kanban_access(cur, kanban_id, usuario_id)
+            if not kanban:
+                raise HTTPException(status_code=404, detail="Kanban nao encontrado")
+
+            # Remove cards nativos explicitamente para funcionar mesmo em bancos
+            # que ainda nao estejam com a FK em cascade atualizada.
+            cur.execute(
+                """
+                DELETE FROM kanban_cards
+                WHERE kanban_id = %s AND usuario_id = %s
+                """,
+                (kanban_id, usuario_id),
+            )
+
+            # Remove o quadro das ideias vinculadas para manter contagens e estado consistentes.
+            cur.execute(
+                """
+                UPDATE ideias
+                SET kanban_id = NULL,
+                    kanban_ativo = FALSE,
+                    kanban_status = NULL,
+                    kanban_updated_at = NOW()
+                WHERE kanban_id = %s AND usuario_id = %s
+                """,
+                (kanban_id, usuario_id),
+            )
+
+            cur.execute(
+                """
+                DELETE FROM kanbans
+                WHERE id = %s AND usuario_id = %s
+                RETURNING id
+                """,
+                (kanban_id, usuario_id),
+            )
+            kanban_excluido = cur.fetchone()
+            if not kanban_excluido:
+                raise HTTPException(status_code=404, detail="Kanban nao encontrado")
+
+            conn.commit()
+            return {"detail": "Kanban excluido com sucesso"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao excluir kanban: {str(e)}")
     finally:
         conn.close()
 
@@ -1752,8 +2004,17 @@ def criar_card_kanban(
 
             cur.execute(
                 """
-                INSERT INTO kanban_cards (kanban_id, projeto_id, usuario_id, titulo, descricao, kanban_status)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO kanban_cards (
+                    kanban_id,
+                    projeto_id,
+                    usuario_id,
+                    titulo,
+                    descricao,
+                    checklist,
+                    prazo_entrega,
+                    kanban_status
+                )
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s)
                 RETURNING id
                 """,
                 (
@@ -1761,7 +2022,9 @@ def criar_card_kanban(
                     kanban["projeto_id"],
                     usuario_id,
                     titulo,
-                    payload.descricao.strip() if payload.descricao else None,
+                    _normalize_optional_text(payload.descricao),
+                    psycopg2.extras.Json(_normalize_kanban_checklist(payload.checklist)),
+                    payload.prazo_entrega,
                     status_final,
                 ),
             )
@@ -1785,6 +2048,7 @@ def atualizar_card_kanban(
     user: dict = Depends(obter_usuario_atual),
 ):
     usuario_id = user["user_id"]
+    payload_fields = getattr(payload, "model_fields_set", None) or getattr(payload, "__fields_set__", set())
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -1794,15 +2058,27 @@ def atualizar_card_kanban(
 
             titulo = (
                 _normalize_workspace_name(payload.titulo, "card")
-                if payload.titulo is not None
+                if "titulo" in payload_fields
                 else card_atual["titulo"]
             )
-            descricao = card_atual.get("descricao")
-            if payload.descricao is not None:
-                descricao = payload.descricao.strip() or None
+            descricao = (
+                _normalize_optional_text(payload.descricao)
+                if "descricao" in payload_fields
+                else card_atual.get("descricao")
+            )
+            checklist = (
+                _normalize_kanban_checklist(payload.checklist)
+                if "checklist" in payload_fields
+                else (card_atual.get("checklist") or [])
+            )
+            prazo_entrega = (
+                payload.prazo_entrega
+                if "prazo_entrega" in payload_fields
+                else card_atual.get("prazo_entrega")
+            )
             status_final = (
                 _validate_kanban_status(payload.kanban_status)
-                if payload.kanban_status is not None
+                if "kanban_status" in payload_fields
                 else card_atual["kanban_status"]
             )
 
@@ -1811,12 +2087,22 @@ def atualizar_card_kanban(
                 UPDATE kanban_cards
                 SET titulo = %s,
                     descricao = %s,
+                    checklist = %s::jsonb,
+                    prazo_entrega = %s,
                     kanban_status = %s,
                     updated_at = NOW()
                 WHERE id = %s AND usuario_id = %s
                 RETURNING id
                 """,
-                (titulo, descricao, status_final, card_id, usuario_id),
+                (
+                    titulo,
+                    descricao,
+                    psycopg2.extras.Json(checklist),
+                    prazo_entrega,
+                    status_final,
+                    card_id,
+                    usuario_id,
+                ),
             )
             card = cur.fetchone()
             if not card:
@@ -1830,6 +2116,38 @@ def atualizar_card_kanban(
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=500, detail=f"Erro ao atualizar card do kanban: {str(e)}")
+    finally:
+        conn.close()
+
+
+@app.delete("/api/kanban-cards/{card_id}")
+def excluir_card_kanban(
+    card_id: int,
+    user: dict = Depends(obter_usuario_atual),
+):
+    usuario_id = user["user_id"]
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                """
+                DELETE FROM kanban_cards
+                WHERE id = %s AND usuario_id = %s
+                RETURNING id
+                """,
+                (card_id, usuario_id),
+            )
+            card = cur.fetchone()
+            if not card:
+                raise HTTPException(status_code=404, detail="Card do kanban nao encontrado")
+
+            conn.commit()
+            return {"detail": "Card do kanban excluido com sucesso"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao excluir card do kanban: {str(e)}")
     finally:
         conn.close()
 

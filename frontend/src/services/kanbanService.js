@@ -128,3 +128,21 @@ export async function atualizarCardKanban(cardId, payload) {
 
   return data
 }
+
+export async function deletarCardKanban(cardId) {
+  const response = await fetch(`${API_BASE_URL}/kanban-cards/${cardId}`, {
+    method: 'DELETE',
+    headers: buildAuthHeaders(),
+  })
+
+  const contentType = response.headers.get('content-type') || ''
+  const data = contentType.includes('application/json')
+    ? await response.json().catch(() => ({}))
+    : {}
+
+  if (!response.ok) {
+    throw new Error(data?.detail || `Erro ao excluir card do kanban (${response.status})`)
+  }
+
+  return data
+}

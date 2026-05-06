@@ -1,6 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import KanbanActionsMenu from '../components/KanbanActionsMenu'
 import { useWorkspace } from '../context/WorkspaceContext'
+import { showDeleteConfirm } from '../utils/alerts'
+
+function getChecklistProgress(kanban) {
+  const checklist = Array.isArray(kanban?.checklist) ? kanban.checklist : []
+  const concluido = checklist.filter((item) => item.concluido).length
+  return { total: checklist.length, concluido }
+}
 
 function Kanban() {
   const navigate = useNavigate()
@@ -11,6 +19,7 @@ function Kanban() {
     selectedProject,
     kanbanOptions,
     criarKanban,
+    excluirKanban,
     selecionarProjeto,
   } = useWorkspace()
 
@@ -90,6 +99,20 @@ function Kanban() {
   function handleSelecionarProjeto(value) {
     setProjetoId(value)
     selecionarProjeto(value ? Number(value) : null)
+  }
+
+  async function handleExcluirKanban(kanban) {
+    const result = await showDeleteConfirm(kanban.nome, {
+      title: 'Excluir kanban?',
+      html: `Deseja excluir o kanban <strong>"${kanban.nome}"</strong>?<br><br>Os cards nativos serao removidos e as ideias vinculadas sairao deste quadro.`,
+      confirmButtonText: 'Sim, excluir kanban!',
+    })
+
+    if (!result.isConfirmed) {
+      return
+    }
+
+    await excluirKanban(kanban.id)
   }
 
   return (
@@ -215,30 +238,69 @@ function Kanban() {
               ) : (
                 <div className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
                   {kanbansVisiveis.map((kanban) => (
-                    <button
+                    <article
                       key={kanban.id}
-                      type="button"
-                      onClick={() => navigate(`/app/kanban/${kanban.id}`)}
                       className="rounded-2xl border border-slate-200 bg-white p-5 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-indigo-200 hover:shadow-md"
+                      style={kanban.cor ? { boxShadow: `inset 0 4px 0 0 ${kanban.cor}` } : undefined}
                     >
-                      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
-                        {kanban.espaco_nome || espacoSelecionado?.nome || 'Espaco'}
-                      </p>
-                      <h3 className="mt-2 text-xl font-semibold text-slate-900">
-                        {kanban.nome}
-                      </h3>
-                      <p className="mt-2 text-sm text-slate-500">
-                        {kanban.projeto_nome || projetoSelecionado?.nome || 'Projeto'}
-                      </p>
-                      <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-4 text-sm">
-                        <span className="font-medium text-indigo-600">
-                          Abrir quadro
-                        </span>
-                        <span className="text-slate-400">
-                          {kanban.cards_count || 0} card(s)
-                        </span>
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+                            {kanban.espaco_nome || espacoSelecionado?.nome || 'Espaco'}
+                          </p>
+                          <div className="mt-2 flex items-center gap-2">
+                            <span
+                              className="h-3 w-3 rounded-full border border-white/70 shadow-sm"
+                              style={{ backgroundColor: kanban.cor || '#6366F1' }}
+                            />
+                            <h3 className="truncate text-xl font-semibold text-slate-900">
+                              {kanban.nome}
+                            </h3>
+                          </div>
+                          {kanban.descricao ? (
+                            <p className="mt-3 line-clamp-3 text-sm text-slate-500">
+                              {kanban.descricao}
+                            </p>
+                          ) : (
+                            <p className="mt-3 text-sm text-slate-400">
+                              Abra o quadro para configurar este kanban.
+                            </p>
+                          )}
+                        </div>
+
+                        <KanbanActionsMenu
+                          kanban={kanban}
+                          onEdit={() => navigate(`/app/kanban/${kanban.id}`, { state: { openKanbanConfig: true } })}
+                          onDelete={() => handleExcluirKanban(kanban)}
+                        />
                       </div>
-                    </button>
+
+                      <button
+                        type="button"
+                        onClick={() => navigate(`/app/kanban/${kanban.id}`, { state: { openKanbanConfig: true } })}
+                        className="mt-2 block w-full text-left"
+                      >
+                        <p className="text-sm text-slate-500">
+                          {kanban.projeto_nome || projetoSelecionado?.nome || 'Projeto'}
+                        </p>
+                        <div className="mt-4 flex flex-wrap gap-2">
+                          <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600">
+                            {getChecklistProgress(kanban).concluido}/{getChecklistProgress(kanban).total} checklist
+                          </span>
+                          <span className="rounded-full bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700">
+                            {kanban.cards_count || 0} card(s)
+                          </span>
+                        </div>
+                        <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-4 text-sm">
+                          <span className="font-medium text-indigo-600">
+                            Abrir quadro
+                          </span>
+                          <span className="text-slate-400">
+                            Configurar ou abrir
+                          </span>
+                        </div>
+                      </button>
+                    </article>
                   ))}
                 </div>
               )}
